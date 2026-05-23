@@ -71,7 +71,7 @@ All tables use UUID primary keys (TEXT) for sync-friendliness. Timestamps are Un
 ```sql
 categories  (id, name, created_at, updated_at, deleted_at?, archived)
 projects    (id, name, category_id→categories, created_at, updated_at, deleted_at?, archived)
-sessions    (id, category_id→categories, project_id→projects,
+sessions    (id, category_id→categories, project_id?→projects,
              planned_duration_min, actual_duration_sec, started_at, ended_at,
              end_notes?, status, created_at, device_id)
 captures    (id, session_id→sessions, text, captured_at,
@@ -81,6 +81,8 @@ config      (key, value)
 ```
 
 Sessions are written once on session end — never edited. Captures get two single-flag updates (cleared, sent_to_reminders) but no other mutations.
+
+`project_id` is nullable. A session belongs to a category and optionally a project. The project selection screen always offers a "no project" option. Sessions without a project display as "Category / —" in the TUI. The Phase 4 migration recreates the sessions table with `project_id TEXT REFERENCES projects(id)` (dropping NOT NULL); existing rows are copied as-is. The Go layer maps NULL ↔ empty string at the scan boundary, consistent with how `end_notes` is handled.
 
 See `internal/store/schema.sql` for the full DDL with indexes.
 
@@ -123,7 +125,12 @@ The target end time also shifts forward by pause duration on resume, so the sess
 
 **Resume on restart:** if the most recent session is `ended_early`, the start screen offers `Resume <category>/<project> with N minutes remaining` as an option. Selecting it creates a new session with the same category/project and `planned_duration_min = remaining` (previous planned minus previous actual). The previous `ended_early` row stays as-is — resume creates a fresh row, never edits.
 
-**What-Next screen:** shows the captures from the just-ended session at the top, then action choices: `Continue Session` (new session, same settings), `New Session` (back to SetupCategory), `Break` (5-minute break, returns here), `End`. Capture disposition (clear / send to Reminders) is deferred to Phase 4.
+**What-Next screen:** shows the captures from the just-ended session at the top, then action choices: `Continue Session` (new session, same settings), `New Session` (back to SetupCategory), `Break` (5-minute break, returns here), `End`. Capture disposition is deferred to Phase 4.
+
+**Capture disposition (Phase 4):** each capture on the What-Next screen gets three actions:
+- `Clear` — mark done; stays in DB for history.
+- `Send to Reminders` — write to `jacktasks-inbox` via EventKit; stays in DB, `sent_to_reminders` flagged.
+- `Do` — start a new session for this capture. Marks it cleared and routes into normal session setup (category → optional project → duration). The capture text is shown as context but does not pre-fill any field; user picks category, then picks an existing project, creates a new one, or skips project entirely ("no project").
 
 ## Directory structure
 
@@ -132,7 +139,9 @@ jacktasks/
 ├── go.mod
 ├── go.sum
 ├── cmd/
-│   └── jacktasks/main.go      # CLI entrypoint (stdin driver)
+│   └── jacktasks/
+│       ├── main.go            # entrypoint: open store, run tea.Program
+│       └── model.go           # Bubble Tea model (Init/Update/View + handlers)
 ├── internal/
 │   ├── paths/                 # filesystem paths (DataDir, DBPath)
 │   ├── session/               # pure session state machine (no I/O)
@@ -174,9 +183,11 @@ sqlite3 ~/Library/Application\ Support/jacktasks/jacktasks.db ".tables"
 
 **Phase 1 — Data layer (closed):** SQLite schema + idempotent migrations, DAL for all six tables with tests, paths package, device_id lazy-init, `cmd/jacktasks/main.go` wiring. 24 tests passing.
 
-**Phase 2 — Core session loop (closed):** `internal/session/` is a pure state-machine package with no I/O. `cmd/jacktasks/main.go` is a thin stdin driver on top of it. All states, commands (`upn`, `ext`, `pause`, `resume`, `end`), duration accounting, and resume-on-restart are implemented and tested. Sessions and captures written to store on session end only. The same package will back the Bubble Tea TUI in Phase 3 unchanged.
+**Phase 2 — Core session loop (closed):** `internal/session/` is a pure state-machine package with no I/O. All states, commands (`upn`, `ext`, `pause`, `resume`, `end`), duration accounting, and resume-on-restart are implemented and tested. Sessions and captures written to store on session end only.
 
-**Phases 3–6 (planned):** see `LOG.md` for the running phase plan. Briefly: Bubble Tea TUI, Reminders integration, crash recovery, sync service + client.
+**Phase 3 — Bubble Tea TUI (closed):** The stdin driver in `cmd/jacktasks/main.go` has been replaced with a Bubble Tea TUI (`cmd/jacktasks/model.go`). `internal/session/` was unchanged. Full screen-by-screen port: resume offer, category/project selection with inline create, duration, active command loop, end notes, what-next, break countdown. Auto-ends session when timer expires; auto-ends break after 5 minutes. Session data snapshotted before async store write to avoid machine-state races. Dependencies added: `charmbracelet/bubbletea`, `charmbracelet/lipgloss`, `charmbracelet/bubbles`.
+
+**Phases 4–6 (planned):** see `LOG.md` for the running phase plan. Briefly: Reminders integration, crash recovery, sync service + client.
 
 ## What's deliberately out of V1
 

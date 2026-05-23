@@ -119,9 +119,48 @@ Goal: pure session state machine + thin stdin driver. No Bubble Tea yet.
 | 0 | Spike: prove go-eventkit + Tailscale | ✅ closed |
 | 1 | Data layer with tests | ✅ closed |
 | 2 | Core session loop with stdin prompts | ✅ closed |
-| 3 | Bubble Tea TUI replacing prompts | ⬜ next |
-| 4 | Reminders integration | ⬜ |
+| 3 | Bubble Tea TUI replacing prompts | ✅ closed |
+| 4 | Reminders integration | ⬜ next |
 | 5 | Crash recovery / state persistence | ⬜ |
 | 6 | Sync service + client | ⬜ |
 
-Time estimate: ~8–12 more sessions across Phases 3–6, with Phase 3 dominating.
+Time estimate: ~6–9 more sessions across Phases 4–6.
+
+---
+
+## 2026-05-23 — Phase 3: Bubble Tea TUI
+
+Goal: replace the throwaway stdin driver with a proper Bubble Tea TUI. `internal/session/` unchanged.
+
+**Done:**
+- Added dependencies: `charmbracelet/bubbletea v1.3.10`, `charmbracelet/lipgloss v1.1.0`, `charmbracelet/bubbles v1.0.0`.
+- `cmd/jacktasks/main.go` reduced to store open + `tea.NewProgram(m, tea.WithAltScreen())`.
+- `cmd/jacktasks/model.go`: full Bubble Tea model. One `textinput.Model` component, reconfigured per screen. `uiExtra` enum handles sub-states that don't map to `session.Machine` states (entering a new category/project name; entering duration for "continue session").
+- All screens implemented: resume offer, category selection (list + inline create), project selection (list + inline create), duration, active command loop, paused, end notes, what-next, break countdown.
+- Timer auto-ends the session when it hits zero (via `tickMsg` handler). Break auto-ends after 5 minutes (tracked as `breakEnd time.Time` in the model, not in the session package).
+- `saveSessionCmd` snapshots `CreateSessionInput` and captures in the main goroutine before dispatching, so machine state changes mid-flight can't corrupt the write.
+- 39 tests passing (all in `internal/`; no TUI tests — correct, the session package covers the logic).
+
+**Trade-offs explicitly accepted:**
+- No TUI-layer tests. The session package covers all logic; the TUI is glue. Manual smoke testing covers the rest.
+- Break duration (5 min) is hardcoded in the TUI model, not the session package. Session package tracks `breakStart` but has no concept of a break target — that's fine since break duration is purely a display concern.
+- Session data is written to the store while the user is on the WhatNext screen. There is a sub-second window where End/New Session could race the write, but the snapshot approach makes this safe.
+- Alt screen enabled (`tea.WithAltScreen()`). Restores terminal on quit cleanly.
+
+---
+
+## 2026-05-23 — Pre-Phase 4 design decisions
+
+**Decided: nullable `project_id` in sessions.**
+
+A session belongs to a category and optionally a project. The current schema enforces NOT NULL on `project_id`, which breaks down for one-off captures ("email Sarah", "look up that thing") that fit a category but no ongoing project. Making it nullable is the honest data model.
+
+Rejected alternative: a per-category "misc" sentinel project. Avoids the schema change but pollutes the project list and is semantically wrong.
+
+Migration approach: recreate the sessions table with `project_id TEXT REFERENCES projects(id)` (no NOT NULL), copy existing rows, drop old table, rename. All queries that join on `project_id` become LEFT JOINs. Go layer: NULL ↔ empty string at the scan boundary, same pattern as `end_notes`.
+
+TUI impact: project selection screen gets a permanent "no project" option. Active screen shows "Category / —" when no project is set.
+
+**Decided: "Do" action on captures routes to normal session setup, not a pre-filled project name.**
+
+On the What-Next capture disposition screen, "Do" marks the capture cleared and starts a new session setup flow (category → optional project → duration). The capture text is shown as context but doesn't pre-fill any field — user picks category, then picks a project, creates one, or skips ("no project"). This keeps the setup flow consistent and avoids the UX confusion of auto-naming a project from freeform capture text.
