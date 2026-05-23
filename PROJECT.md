@@ -143,23 +143,42 @@ jacktasks/
 ├── go.mod
 ├── go.sum
 ├── cmd/
-│   └── jacktasks/
-│       ├── main.go            # entrypoint: open store, run tea.Program
-│       └── model.go           # Bubble Tea model (Init/Update/View + handlers)
+│   ├── jacktasks/
+│   │   ├── main.go            # entrypoint: open store, run tea.Program
+│   │   ├── model.go           # Bubble Tea model (Init/Update/View + handlers)
+│   │   └── styles.go          # Lipgloss palette, key maps
+│   └── jacktasks-sync/
+│       └── main.go            # sync server entrypoint (env-configured)
 ├── internal/
 │   ├── paths/                 # filesystem paths (DataDir, DBPath)
+│   ├── recovery/              # active.json sentinel (crash recovery)
+│   ├── reminders/             # Apple Reminders client + fake
 │   ├── session/               # pure session state machine (no I/O)
 │   │   ├── session.go
 │   │   └── session_test.go
-│   └── store/                 # SQLite layer
-│       ├── schema.sql
-│       ├── store.go           # Open, Close, pragmas, migrations
-│       ├── categories.go
-│       ├── projects.go
-│       ├── sessions.go
-│       ├── captures.go
-│       ├── config.go          # Get/Set + DeviceID lazy init
-│       └── *_test.go
+│   ├── store/                 # SQLite layer
+│   │   ├── schema.sql
+│   │   ├── store.go           # Open, Close, pragmas, migrations
+│   │   ├── sync.go            # PullSince, UpsertFromSync (used by server + client)
+│   │   ├── syncstate.go       # GetSyncState, SetLastPushAt, SetLastPullAt
+│   │   ├── categories.go
+│   │   ├── projects.go
+│   │   ├── sessions.go
+│   │   ├── captures.go
+│   │   ├── config.go          # Get/Set + DeviceID lazy init
+│   │   └── *_test.go
+│   ├── syncclient/            # client-side push-pull logic (jacktasks sync)
+│   │   ├── client.go
+│   │   └── client_test.go
+│   ├── syncproto/             # shared wire types (PushRequest, PullResponse, etc.)
+│   └── syncserver/            # HTTP handler logic for jacktasks-sync
+│       ├── server.go
+│       └── server_test.go
+├── deploy/
+│   ├── DEPLOY.md              # step-by-step ThinkCentre deploy instructions
+│   ├── jacktasks-sync.service # systemd unit file
+│   └── env.template           # env file template (copy → /etc/jacktasks-sync/env)
+├── Makefile                   # check, install, build-sync-linux targets
 ├── PROJECT.md                 # this file
 ├── CLAUDE.md                  # AI handoff instructions
 └── LOG.md                     # running record of decisions
@@ -168,18 +187,45 @@ jacktasks/
 ## Build, test, run
 
 ```bash
-# all tests
-go test ./...
+make check                # build + vet + test (pre-commit gate)
+make install              # install jacktasks TUI to /usr/local/bin (macOS)
+make build-sync-linux     # cross-compile sync server for linux/amd64
 
-# verbose (per-test detail)
-go test -v ./...
+go run ./cmd/jacktasks    # run TUI from source
+jacktasks sync            # one-shot sync (requires JACKTASKS_SYNC_URL + TOKEN in env)
 
-# run the CLI (currently just opens DB + prints device_id)
-go run ./cmd/jacktasks
-
-# inspect the live database
 sqlite3 ~/Library/Application\ Support/jacktasks/jacktasks.db ".tables"
 ```
+
+## Deployment
+
+The sync server (`jacktasks-sync`) runs on the ThinkCentre. Full step-by-step instructions are in `deploy/DEPLOY.md`. Summary:
+
+**Build and ship the server binary:**
+```bash
+make build-sync-linux
+scp jacktasks-sync-linux <thinkcentre>:/tmp/jacktasks-sync
+```
+
+**First-time server setup (on ThinkCentre):**
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin jacktasks
+sudo mv /tmp/jacktasks-sync /usr/local/bin/jacktasks-sync && sudo chmod 755 /usr/local/bin/jacktasks-sync
+sudo mkdir -p /var/lib/jacktasks-sync && sudo chown jacktasks:jacktasks /var/lib/jacktasks-sync
+sudo mkdir -p /etc/jacktasks-sync
+# copy deploy/env.template → /etc/jacktasks-sync/env, fill in token + Tailscale IP
+sudo cp deploy/jacktasks-sync.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now jacktasks-sync
+curl http://<tailscale-ip>:8484/healthz   # → {"ok":true}
+```
+
+**On each Mac — add to `~/.zshrc`:**
+```bash
+export JACKTASKS_SYNC_URL=http://<thinkcentre-tailscale-ip>:8484
+export JACKTASKS_SYNC_TOKEN=<shared token>
+```
+
+Then `jacktasks sync` to push/pull. See `deploy/DEPLOY.md` for the full cross-Mac convergence verification procedure.
 
 ## Current state
 
@@ -199,7 +245,48 @@ sqlite3 ~/Library/Application\ Support/jacktasks/jacktasks.db ".tables"
 
 **Phase 5.5 — TUI polish (closed):** `cmd/jacktasks/styles.go` — Lipgloss palette with `AdaptiveColor`, named styles, key maps. Persistent header (app name / screen name / session context) and footer (context-sensitive key hints) on every screen. Arrow-key cursor navigation on all list screens with Enter-to-select; numeric shortcuts still work. `bubbles/progress` bar on Active, Paused, and Break screens. `bubbles/spinner` for inbox load and session save. No state-machine or flow changes. One new indirect dep: `charmbracelet/harmonica` (required by `bubbles/progress`).
 
-**Phase 6 — Sync (planned, mid-week):** split into 6a protocol + server skeleton (`cmd/jacktasks-sync/`, REST endpoints, conflict rules), 6b client `jacktasks sync` subcommand, 6c deploy to ThinkCentre and verify cross-Mac convergence. One new schema migration required: `captures.updated_at` for LWW on capture flags. See `LOG.md` for the full plan.
+**Phase 6a — Sync protocol + server skeleton (closed):** `captures.updated_at` migration + backfill + index. `internal/syncproto/` shared wire types and table constants. `cmd/jacktasks-sync/` server binary (env-configured: `JACKTASKS_SYNC_TOKEN`, `JACKTASKS_SYNC_DB`, `JACKTASKS_SYNC_ADDR`). `internal/store/sync.go` — `PullSince` (generic, column-list-driven) and `UpsertFromSync` (per-table conflict strategy). `internal/syncserver/` — auth middleware, `/healthz`, `/push`, `/pull` handlers. 8 syncserver tests covering round-trip, LWW, append-only dedup, auth, empty-array response, missing-ID rejection. Wire protocol documented in PROJECT.md.
+
+**Phase 6b — Client `jacktasks sync` subcommand (closed):** `internal/store/syncstate.go` — `GetSyncState`, `SetLastPushAt`, `SetLastPullAt` (independent upserts, neither clobbers the other). `UpdateProject` added to projects DAL. `internal/syncclient/` — `Sync` runs push-before-pull per table; bookmarks advanced per-table on success so partial sync is safe; formatted summary output. Subcommand dispatch in `cmd/jacktasks/main.go`: `jacktasks sync` (reads `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN`) vs TUI. 5 syncclient tests: round-trip, idempotent re-sync, LWW convergence, bad token, missing config. 68 tests total.
+
+**Phase 6c — Deploy + verify:** `Makefile` with `check` / `install` / `build-sync-linux` targets. `deploy/` directory: `DEPLOY.md` step-by-step guide, `jacktasks-sync.service` systemd unit, `env.template`. Cross-compilation to `linux/amd64` verified (statically linked ELF, no libc dependency). Remaining steps are operational: run on ThinkCentre, first sync from each Mac, cross-device convergence check — see `deploy/DEPLOY.md`.
+
+## Sync protocol
+
+REST over HTTP, JSON bodies. Server binds to Tailscale interface only. Auth: `Authorization: Bearer <token>` from `JACKTASKS_SYNC_TOKEN` env var.
+
+### Endpoints
+
+```
+GET  /healthz
+POST /push?table=<name>           body: {"rows": [...]}
+                                  returns: {"accepted": N, "rejected": [...]}
+GET  /pull?table=<name>&since=<unix_sec>
+                                  returns: {"rows": [...], "as_of": <unix_sec>}
+```
+
+Tables synced: `projects`, `categories`, `sessions`, `captures`.
+Not synced: `config` (per-device device_id), `sync_state` (per-device bookkeeping).
+
+### Wire format
+
+Each row is a flat JSON object matching the table columns. Rules:
+- Timestamps: Unix epoch seconds (integers), same as DB storage.
+- NULL fields: JSON `null` (not empty string — wire is stricter than the Go↔SQL boundary).
+- Boolean fields (`cleared`, `sent_to_reminders`, `archived`): JSON integers 0/1 (matches DB storage).
+
+### Conflict rules
+
+| Table | Strategy |
+|---|---|
+| `sessions` | Pure append. `INSERT OR IGNORE` by UUID on both sides. |
+| `captures` | Pure append for new rows. Flag updates (`cleared`, `sent_to_reminders`) use last-write-wins on `updated_at`. |
+| `projects` | Last-write-wins on `updated_at`. `deleted_at` tombstone wins over any update with older `updated_at`. |
+| `categories` | Same as projects. |
+
+### Sync flow (client, Phase 6b)
+
+For each table: push rows newer than `sync_state.last_push_at`, then pull rows newer than `sync_state.last_pull_at`. Push before pull. Update `sync_state` per table on success. Partial sync is fine — state is updated as each table completes.
 
 ## What's deliberately out of V1
 

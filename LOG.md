@@ -503,3 +503,98 @@ Goal: make the daily-driver experience feel like a real Charm app. No state-mach
 - No `bubbles/list` component. The plan specified it but the numeric-plus-cursor approach achieves the same UX with less structural change and keeps the existing handler logic intact. The cursor gives visual selection feedback; arrows give keyboard nav; numbers give power-user shortcuts. `bubbles/list` would have required replacing the entire input model per screen — more churn than value.
 - `bubbles/help` is not used for Active/Paused footers because the component skips bindings that have no key triggers (our commands are free-typed strings, not key bindings). Plain-text footer is functionally equivalent and cleaner.
 - Progress bar shows 0% at session start even though one second has elapsed. The `SetPercent` call fires on the first tick; the sub-second gap is imperceptible.
+
+---
+
+## 2026-05-23 — Phase 6a: Sync protocol + server skeleton
+
+Goal: schema migration for LWW on capture flags, shared wire types, HTTP sync server.
+
+**Done:**
+
+- **`captures.updated_at` migration** — `migrateCapturesUpdatedAt` in `store.go` detects the column via `PRAGMA table_info`, adds it via `ALTER TABLE ADD COLUMN`, backfills `updated_at = created_at` for existing rows, then creates `idx_captures_updated`. Index creation moved out of `schema.sql` (where it would fail on old DBs lacking the column) and into the migration function, which always runs it idempotently. `MarkCaptureCleared` and `MarkCaptureSentToReminders` now stamp `updated_at = now`. `Capture` struct gains `UpdatedAt`. `TestMigrateCapturesUpdatedAt` exercises old-schema → migration → new-schema path including backfill.
+
+- **`internal/syncproto/`** — new package. `PushRequest`, `PushResponse`, `PullResponse`, `HealthResponse` wire types. `SyncedTables` ordered slice (projects → categories → sessions → captures; FK-safe insertion order). Table name constants. Used by both server and (upcoming) client.
+
+- **`internal/store/sync.go`** — `PullSince(ctx, table, sinceUnix)` generic pull using `tableColumns` and `pullColumn` maps; returns `[]map[string]any` with raw SQLite types ready for JSON. `UpsertFromSync(ctx, table, rows)` dispatches to per-table functions:
+  - `upsertProject` / `upsertCategory`: `INSERT ... ON CONFLICT(id) DO UPDATE SET ... WHERE excluded.updated_at > <table>.updated_at` (last-write-wins)
+  - `upsertSession`: `INSERT OR IGNORE` (pure append, immutable)
+  - `upsertCapture`: `INSERT ... ON CONFLICT(id) DO UPDATE SET cleared, sent_to_reminders, updated_at WHERE excluded.updated_at > captures.updated_at` (LWW on flags only)
+
+- **`cmd/jacktasks-sync/main.go`** — server binary. Reads `JACKTASKS_SYNC_TOKEN`, `JACKTASKS_SYNC_DB`, `JACKTASKS_SYNC_ADDR` from env (all required). Opens store, wires mux, calls `http.ListenAndServe`.
+
+- **`internal/syncserver/server.go`** — `NewMux` builds the handler. Auth middleware checks `Authorization: Bearer <token>` on all routes except `/healthz`. `handleHealthz` returns `{"ok":true}`. `handlePush` decodes body, calls `UpsertFromSync`, returns accepted/rejected counts. `handlePull` reads `since` query param (defaults 0), calls `PullSince`, returns rows + `as_of` timestamp. Empty pulls return `[]` not `null`.
+
+- **`internal/syncserver/server_test.go`** — 8 tests via `httptest.Server`: healthz no-auth, auth rejection (4 variants), unknown table 400, push/pull round-trip for projects, projects LWW (newer wins, stale loses), sessions append-only dedup, captures flag LWW, empty-pull returns array, missing-ID rejection.
+
+**Result:** all packages pass (57 tests). Build and vet clean. `cmd/jacktasks-sync` compiles; no new dependencies.
+
+**Trade-offs accepted:**
+- `map[string]any` wire format means JSON decode produces `float64` for all numbers on the receiving end. The upsert SQL handles this correctly (SQLite converts `float64(1.0)` to INTEGER 1 under INTEGER affinity). Test assertions on pull results must use `.(float64)`, not `.(int64)`. Documented here so Phase 6b client code doesn't make the same mistake.
+- `UpsertFromSync` counts a row as "accepted" if no SQL error occurred, even when the LWW WHERE clause prevented an update. "Accepted" means "processed without error", not "row changed". This is the right semantic — the client doesn't need to know which rows were suppressed by LWW.
+- Server binary is in the same repo. Build on Mac, scp to ThinkCentre — no GitHub credentials on the server. Phase 6c covers the deploy steps.
+
+---
+
+## 2026-05-23 — Phase 6b: Client `jacktasks sync` subcommand
+
+Goal: push-before-pull sync loop from the Mac client, subcommand dispatch, `sync_state` bookkeeping.
+
+**Done:**
+
+- **`internal/store/syncstate.go`** — `SyncState` struct (LastPullAt, LastPushAt int64; both 0 = never synced). `GetSyncState` returns a zero struct for tables with no row (not an error). `SetLastPushAt` and `SetLastPullAt` each upsert only their own column via `ON CONFLICT DO UPDATE` — they do not clobber each other. 4 tests.
+
+- **`internal/store/projects.go`** — `UpdateProject(ctx, id, name)` added. Was deferred from Phase 1; needed now for the LWW convergence test and real use. Bumps `updated_at = now`.
+
+- **`internal/syncclient/client.go`** — `Config{URL, Token}`. `Sync(ctx, store, cfg, out)` iterates `syncproto.SyncedTables` in FK-safe order and calls `syncTable` for each. `syncTable` flow:
+  1. Read `last_push_at` from `sync_state`.
+  2. Snapshot `pushAt = now` before reading local rows (so rows created during the HTTP call are caught next sync).
+  3. `PullSince(ctx, table, last_push_at)` → POST rows to server.
+  4. `SetLastPushAt(pushAt)` on success.
+  5. Re-read `sync_state` for `last_pull_at`.
+  6. GET `/pull?since=last_pull_at` from server.
+  7. `UpsertFromSync(ctx, table, rows)` locally.
+  8. `SetLastPullAt(as_of)` on success.
+  - Partial sync is safe: bookmarks are updated per-table before moving on.
+  - Output: one formatted line per table (`projects:    pushed 2, pulled 0`).
+
+- **`cmd/jacktasks/main.go`** — refactored into `runSync` and `runTUI`. `os.Args[1] == "sync"` dispatches to `runSync`; all other invocations launch the TUI. `runSync` reads `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN` from env, errors clearly if either is missing.
+
+- **`internal/syncclient/client_test.go`** — 5 tests via `httptest.Server` + `syncserver.NewMux`:
+  - `TestSyncRoundTrip`: Mac A creates project/category/session/capture, syncs up; Mac B syncs down and verifies all four entities.
+  - `TestSyncIdempotent`: first sync pushes non-zero rows; second sync (no new data) pushes 0 on every table.
+  - `TestSyncLWWConvergence`: Mac A updates a project and syncs, then Mac B makes a newer competing update and syncs; Mac A's final sync pulls Mac B's winning version. (2-second sleep to guarantee distinct updated_at values; test structured so Mac A's lastPullAt is set before Mac B's competing update.)
+  - `TestSyncBadToken`: wrong token returns an error on the first table.
+  - `TestSyncMissingConfig`: empty URL or token rejected before any network call.
+
+**Result:** 68 tests across all packages. Build and vet clean. `jacktasks sync` dispatches correctly; `go run ./cmd/jacktasks sync` with missing env vars prints a clear error and exits 1.
+
+**Trade-offs accepted:**
+- Mac A pulling its own data back on the first sync (when `lastPullAt = 0`) is expected and harmless — `UpsertFromSync` no-ops via LWW when the incoming row is not newer. The bookmark advances after the first pull so subsequent syncs don't re-pull.
+- `doPush` treats any server rejection as a fatal error for that table. If the server rejects a row (e.g., FK violation because a parent row hasn't synced yet), the whole table sync fails. In practice this shouldn't happen because `SyncedTables` is ordered projects → categories → sessions → captures (parents before children), so FKs are always satisfied on the server before children arrive.
+- `UpdateProject` added to DAL here rather than in Phase 1 because it was only needed at sync time. No schema change.
+
+---
+
+## 2026-05-23 — Phase 6c: Deploy artifacts + cross-Mac verification prep
+
+Goal: produce everything needed to deploy the sync server on the ThinkCentre and verify cross-Mac convergence.
+
+**Done:**
+
+- **`Makefile`** — `make check` (build + vet + test; pre-commit gate), `make install` (TUI to `/usr/local/bin`), `make build-sync-linux` (cross-compile `jacktasks-sync` for `linux/amd64`). Cross-compilation verified: statically linked ELF, no libc dependencies, will run on ThinkCentre without any runtime install.
+
+- **`deploy/jacktasks-sync.service`** — systemd unit. Runs as dedicated `jacktasks` system user (no login shell). Reads env from `EnvironmentFile=/etc/jacktasks-sync/env`. `Restart=on-failure` with 5s back-off.
+
+- **`deploy/env.template`** — template for `/etc/jacktasks-sync/env` with the three required vars: `JACKTASKS_SYNC_TOKEN` (generate with `openssl rand -hex 32`), `JACKTASKS_SYNC_DB` (`/var/lib/jacktasks-sync/master.db`), `JACKTASKS_SYNC_ADDR` (ThinkCentre Tailscale IP + port).
+
+- **`deploy/DEPLOY.md`** — step-by-step deploy guide. Covers: cross-compile + scp, first-time service user + directory setup, env file, systemd unit install, healthz smoke test, Mac client env vars, first sync from MacBook, first sync from Mac Mini (bootstraps its local DB then pulls MacBook's data), convergence check (sessions from both devices visible on both machines via `GROUP BY device_id`), binary update procedure, log tailing.
+
+- **`PROJECT.md`** — `## Deployment` section added with summary commands; `## Build, test, run` updated to reference `make`; directory structure updated to include `deploy/` and `Makefile`.
+
+**Result:** all code complete. 68 tests passing. The remaining work is operational (run on hardware) and is fully documented in `deploy/DEPLOY.md`.
+
+**Notes for the operational phase:**
+- Generate the token once (`openssl rand -hex 32`), add it to `/etc/jacktasks-sync/env` on the ThinkCentre and to `~/.zshrc` on both Macs before running the first sync.
+- The ThinkCentre's Tailscale IP goes in `JACKTASKS_SYNC_ADDR` (server) and `JACKTASKS_SYNC_URL` (clients). Run `tailscale ip -4` on the ThinkCentre to get it.
+- On the Mac Mini's first run, launch `jacktasks` once (not `jacktasks sync`) to bootstrap the local DB and accept the Reminders TCC permission prompt. Then `jacktasks sync` to pull MacBook's data.

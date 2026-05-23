@@ -1,0 +1,15 @@
+[Unit]
+Description=jacktasks sync server
+After=network.target
+
+[Service]
+Type=simple
+User=jacktasks
+Group=jacktasks
+EnvironmentFile=/etc/jacktasks-sync/env
+ExecStart=/usr/local/bin/jacktasks-sync
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

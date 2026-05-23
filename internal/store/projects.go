@@ -83,6 +83,26 @@ func (s *Store) GetProject(ctx context.Context, id string) (*Project, error) {
 	return &p, nil
 }
 
+// UpdateProject changes the name of the project with the given id and bumps
+// updated_at to now. Returns ErrNotFound if no row matches.
+func (s *Store) UpdateProject(ctx context.Context, id, name string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET name = ?, updated_at = ? WHERE id = ?`,
+		name, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("update project: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func scanProject(r rowScanner) (Project, error) {
 	var p Project
 	var createdAt, updatedAt int64

@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS captures (
   captured_at        INTEGER NOT NULL,
   cleared            INTEGER NOT NULL DEFAULT 0,
   sent_to_reminders  INTEGER NOT NULL DEFAULT 0,
-  created_at         INTEGER NOT NULL
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sync_state (

@@ -17,6 +17,7 @@ type Capture struct {
 	Cleared         bool
 	SentToReminders bool
 	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // CreateCapture writes a new capture under the given session.
@@ -36,12 +37,13 @@ func (s *Store) CreateCapture(ctx context.Context, id, sessionID, text string) (
 		Text:       text,
 		CapturedAt: now,
 		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO captures
-		 (id, session_id, text, captured_at, cleared, sent_to_reminders, created_at)
-		 VALUES (?, ?, ?, ?, 0, 0, ?)`,
-		c.ID, c.SessionID, c.Text, c.CapturedAt.Unix(), c.CreatedAt.Unix(),
+		 (id, session_id, text, captured_at, cleared, sent_to_reminders, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 0, 0, ?, ?)`,
+		c.ID, c.SessionID, c.Text, c.CapturedAt.Unix(), c.CreatedAt.Unix(), c.UpdatedAt.Unix(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert capture: %w", err)
@@ -54,7 +56,7 @@ func (s *Store) CreateCapture(ctx context.Context, id, sessionID, text string) (
 // determinism.
 func (s *Store) ListCapturesBySession(ctx context.Context, sessionID string) ([]Capture, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, session_id, text, captured_at, cleared, sent_to_reminders, created_at
+		`SELECT id, session_id, text, captured_at, cleared, sent_to_reminders, created_at, updated_at
 		 FROM captures
 		 WHERE session_id = ?
 		 ORDER BY captured_at, id`,
@@ -80,8 +82,8 @@ func (s *Store) ListCapturesBySession(ctx context.Context, sessionID string) ([]
 // (didn't want it sent to Reminders). Returns ErrNotFound if id missing.
 func (s *Store) MarkCaptureCleared(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE captures SET cleared = 1 WHERE id = ?`,
-		id,
+		`UPDATE captures SET cleared = 1, updated_at = ? WHERE id = ?`,
+		time.Now().Unix(), id,
 	)
 	if err != nil {
 		return fmt.Errorf("update cleared: %w", err)
@@ -100,8 +102,8 @@ func (s *Store) MarkCaptureCleared(ctx context.Context, id string) error {
 // pushed to Apple Reminders. Returns ErrNotFound if id missing.
 func (s *Store) MarkCaptureSentToReminders(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE captures SET sent_to_reminders = 1 WHERE id = ?`,
-		id,
+		`UPDATE captures SET sent_to_reminders = 1, updated_at = ? WHERE id = ?`,
+		time.Now().Unix(), id,
 	)
 	if err != nil {
 		return fmt.Errorf("update sent_to_reminders: %w", err)
@@ -118,17 +120,18 @@ func (s *Store) MarkCaptureSentToReminders(ctx context.Context, id string) error
 
 func scanCapture(r rowScanner) (Capture, error) {
 	var c Capture
-	var capturedAt, createdAt int64
+	var capturedAt, createdAt, updatedAt int64
 	var cleared, sentToReminders int
 
 	if err := r.Scan(
 		&c.ID, &c.SessionID, &c.Text,
-		&capturedAt, &cleared, &sentToReminders, &createdAt,
+		&capturedAt, &cleared, &sentToReminders, &createdAt, &updatedAt,
 	); err != nil {
 		return c, err
 	}
 	c.CapturedAt = time.Unix(capturedAt, 0)
 	c.CreatedAt = time.Unix(createdAt, 0)
+	c.UpdatedAt = time.Unix(updatedAt, 0)
 	c.Cleared = cleared != 0
 	c.SentToReminders = sentToReminders != 0
 	return c, nil
