@@ -1,0 +1,131 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+)
+// Capture is a single upn-captured thought from inside a session.
+type Capture struct {
+	ID              string
+	SessionID       string
+	Text            string
+	CapturedAt      time.Time
+	Cleared         bool
+	SentToReminders bool
+	CreatedAt       time.Time
+}
+
+// CreateCapture writes a new capture under the given session.
+// FK enforced by SQL.
+func (s *Store) CreateCapture(ctx context.Context, sessionID, text string) (*Capture, error) {
+	if text == "" {
+		return nil, errors.New("capture text required")
+	}
+	now := time.Now()
+	c := &Capture{
+		ID:         uuid.NewString(),
+		SessionID:  sessionID,
+		Text:       text,
+		CapturedAt: now,
+		CreatedAt:  now,
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO captures
+		 (id, session_id, text, captured_at, cleared, sent_to_reminders, created_at)
+		 VALUES (?, ?, ?, ?, 0, 0, ?)`,
+		c.ID, c.SessionID, c.Text, c.CapturedAt.Unix(), c.CreatedAt.Unix(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert capture: %w", err)
+	}
+	return c, nil
+}
+
+// ListCapturesBySession returns the captures for a session in capture
+// order (oldest first). Ties on captured_at fall through to id for
+// determinism.
+func (s *Store) ListCapturesBySession(ctx context.Context, sessionID string) ([]Capture, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, session_id, text, captured_at, cleared, sent_to_reminders, created_at
+		 FROM captures
+		 WHERE session_id = ?
+		 ORDER BY captured_at, id`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query captures: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Capture
+	for rows.Next() {
+		c, err := scanCapture(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// MarkCaptureCleared records that the user discarded this capture
+// (didn't want it sent to Reminders). Returns ErrNotFound if id missing.
+func (s *Store) MarkCaptureCleared(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE captures SET cleared = 1 WHERE id = ?`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("update cleared: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkCaptureSentToReminders records that this capture was successfully
+// pushed to Apple Reminders. Returns ErrNotFound if id missing.
+func (s *Store) MarkCaptureSentToReminders(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE captures SET sent_to_reminders = 1 WHERE id = ?`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("update sent_to_reminders: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func scanCapture(r rowScanner) (Capture, error) {
+	var c Capture
+	var capturedAt, createdAt int64
+	var cleared, sentToReminders int
+
+	if err := r.Scan(
+		&c.ID, &c.SessionID, &c.Text,
+		&capturedAt, &cleared, &sentToReminders, &createdAt,
+	); err != nil {
+		return c, err
+	}
+	c.CapturedAt = time.Unix(capturedAt, 0)
+	c.CreatedAt = time.Unix(createdAt, 0)
+	c.Cleared = cleared != 0
+	c.SentToReminders = sentToReminders != 0
+	return c, nil
+}
