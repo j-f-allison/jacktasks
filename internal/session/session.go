@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/j-f-allison/jacktasks/internal/recovery"
 	"github.com/j-f-allison/jacktasks/internal/store"
 )
 
@@ -152,18 +153,29 @@ func (m *Machine) actualDurationSec() int {
 	return int(total.Seconds())
 }
 
-// BeginSetup transitions from Idle to SetupCategory to start a new session
+// BeginSetup transitions from Idle to SetupProject to start a new session
 // flow. Called by the driver after any resume check.
 func (m *Machine) BeginSetup() error {
 	if m.state != StateIdle {
 		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
 	}
+	m.state = StateSetupProject
+	return nil
+}
+
+// SetProject sets the project (empty string = no project) and advances to
+// SetupCategory. Valid from SetupProject.
+func (m *Machine) SetProject(projectID string, now time.Time) error {
+	if m.state != StateSetupProject {
+		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
+	}
+	m.projectID = projectID
 	m.state = StateSetupCategory
 	return nil
 }
 
-// SetCategory sets the category and advances to SetupProject.
-// Valid from Idle or SetupCategory.
+// SetCategory sets the category and advances to SetupDuration.
+// Valid from SetupCategory.
 func (m *Machine) SetCategory(categoryID string, now time.Time) error {
 	if m.state != StateSetupCategory {
 		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
@@ -172,20 +184,6 @@ func (m *Machine) SetCategory(categoryID string, now time.Time) error {
 		return errors.New("categoryID required")
 	}
 	m.categoryID = categoryID
-	m.state = StateSetupProject
-	return nil
-}
-
-// SetProject sets the project and advances to SetupDuration.
-// Valid from SetupProject.
-func (m *Machine) SetProject(projectID string, now time.Time) error {
-	if m.state != StateSetupProject {
-		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
-	}
-	if projectID == "" {
-		return errors.New("projectID required")
-	}
-	m.projectID = projectID
 	m.state = StateSetupDuration
 	return nil
 }
@@ -335,13 +333,13 @@ func (m *Machine) ContinueSession(minutes int, now time.Time) error {
 	return nil
 }
 
-// NewSession resets all session fields and returns to SetupCategory.
+// NewSession resets all session fields and returns to SetupProject.
 // Valid from WhatNext.
 func (m *Machine) NewSession(now time.Time) error {
 	if m.state != StateWhatNext {
 		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
 	}
-	*m = Machine{state: StateSetupCategory}
+	*m = Machine{state: StateSetupProject}
 	return nil
 }
 
@@ -392,3 +390,115 @@ func (m *Machine) StartedAt() time.Time { return m.startedAt }
 
 // Status returns the terminal status set by End.
 func (m *Machine) Status() store.SessionStatus { return m.status }
+
+// Snapshot serializes the current machine state into a recovery.Sentinel.
+// Only valid in StateActive or StatePaused; returns an error otherwise.
+// projectName and categoryName are denormalized display values for the
+// recovery prompt; they do not affect the machine state on Hydrate.
+func (m *Machine) Snapshot(now time.Time, projectName, categoryName string) (recovery.Sentinel, error) {
+	if m.state != StateActive && m.state != StatePaused {
+		return recovery.Sentinel{}, fmt.Errorf("%w: Snapshot requires Active or Paused, got %s", ErrWrongState, m.state)
+	}
+
+	stateStr := "active"
+	if m.state == StatePaused {
+		stateStr = "paused"
+	}
+
+	var completed []recovery.PauseRecord
+	var currentPauseStart int64
+	for _, p := range m.pauses {
+		if p.resumedAt.IsZero() {
+			currentPauseStart = p.pausedAt.Unix()
+		} else {
+			completed = append(completed, recovery.PauseRecord{
+				Start: p.pausedAt.Unix(),
+				End:   p.resumedAt.Unix(),
+			})
+		}
+	}
+	if completed == nil {
+		completed = []recovery.PauseRecord{}
+	}
+
+	caps := make([]recovery.CaptureRecord, len(m.captures))
+	for i, c := range m.captures {
+		caps[i] = recovery.CaptureRecord{
+			ID:         c.ID,
+			Text:       c.Text,
+			CapturedAt: c.CapturedAt.Unix(),
+		}
+	}
+
+	return recovery.Sentinel{
+		Version:            1,
+		SessionID:          m.sessionID,
+		ProjectID:          m.projectID,
+		ProjectName:        projectName,
+		CategoryID:         m.categoryID,
+		CategoryName:       categoryName,
+		PlannedDurationMin: m.plannedMin,
+		StartedAt:          m.startedAt.Unix(),
+		TargetEndAt:        m.targetEnd.Unix(),
+		Pauses:             completed,
+		CurrentPauseStart:  currentPauseStart,
+		Captures:           caps,
+		State:              stateStr,
+		WrittenAt:          now.Unix(),
+	}, nil
+}
+
+// Hydrate reconstructs a Machine from a Sentinel in StateActive or StatePaused.
+// Returns an error if the sentinel is internally inconsistent.
+func Hydrate(s recovery.Sentinel, now time.Time) (*Machine, error) {
+	if s.State != "active" && s.State != "paused" {
+		return nil, fmt.Errorf("hydrate: invalid state %q", s.State)
+	}
+	if s.CategoryID == "" {
+		return nil, errors.New("hydrate: category_id required")
+	}
+	startedAt := time.Unix(s.StartedAt, 0)
+	if !startedAt.Before(now) {
+		return nil, fmt.Errorf("hydrate: started_at %v is not before now %v", startedAt, now)
+	}
+
+	pauses := make([]pauseInterval, len(s.Pauses))
+	for i, p := range s.Pauses {
+		pauses[i] = pauseInterval{
+			pausedAt:  time.Unix(p.Start, 0),
+			resumedAt: time.Unix(p.End, 0),
+		}
+	}
+
+	state := StateActive
+	if s.State == "paused" {
+		if s.CurrentPauseStart == 0 {
+			return nil, errors.New("hydrate: paused state requires current_pause_start")
+		}
+		pauses = append(pauses, pauseInterval{
+			pausedAt: time.Unix(s.CurrentPauseStart, 0),
+		})
+		state = StatePaused
+	}
+
+	caps := make([]Capture, len(s.Captures))
+	for i, c := range s.Captures {
+		caps[i] = Capture{
+			ID:         c.ID,
+			Text:       c.Text,
+			CapturedAt: time.Unix(c.CapturedAt, 0),
+		}
+	}
+
+	return &Machine{
+		state:      state,
+		categoryID: s.CategoryID,
+		projectID:  s.ProjectID,
+		plannedMin: s.PlannedDurationMin,
+		sessionID:  s.SessionID,
+		startedAt:  startedAt,
+		targetEnd:  time.Unix(s.TargetEndAt, 0),
+		pauses:     pauses,
+		captures:   caps,
+	}, nil
+}

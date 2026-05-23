@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/j-f-allison/jacktasks/internal/recovery"
 	"github.com/j-f-allison/jacktasks/internal/store"
 )
 
@@ -24,11 +25,11 @@ func setupToActive(t *testing.T, minutes int) (*Machine, time.Time) {
 	if err := m.BeginSetup(); err != nil {
 		t.Fatalf("BeginSetup: %v", err)
 	}
-	if err := m.SetCategory(testCatID, now); err != nil {
-		t.Fatalf("SetCategory: %v", err)
-	}
 	if err := m.SetProject(testProjID, now); err != nil {
 		t.Fatalf("SetProject: %v", err)
+	}
+	if err := m.SetCategory(testCatID, now); err != nil {
+		t.Fatalf("SetCategory: %v", err)
 	}
 	if err := m.SetDuration(minutes, now); err != nil {
 		t.Fatalf("SetDuration: %v", err)
@@ -52,19 +53,19 @@ func TestSetupFlow(t *testing.T) {
 	if err := m.BeginSetup(); err != nil {
 		t.Fatalf("BeginSetup: %v", err)
 	}
-	if m.State() != StateSetupCategory {
-		t.Fatalf("want SetupCategory, got %s", m.State())
-	}
-
-	if err := m.SetCategory(testCatID, now); err != nil {
-		t.Fatalf("SetCategory: %v", err)
-	}
 	if m.State() != StateSetupProject {
 		t.Fatalf("want SetupProject, got %s", m.State())
 	}
 
 	if err := m.SetProject(testProjID, now); err != nil {
 		t.Fatalf("SetProject: %v", err)
+	}
+	if m.State() != StateSetupCategory {
+		t.Fatalf("want SetupCategory, got %s", m.State())
+	}
+
+	if err := m.SetCategory(testCatID, now); err != nil {
+		t.Fatalf("SetCategory: %v", err)
 	}
 	if m.State() != StateSetupDuration {
 		t.Fatalf("want SetupDuration, got %s", m.State())
@@ -92,6 +93,7 @@ func TestSetCategoryWrongState(t *testing.T) {
 func TestSetCategoryEmpty(t *testing.T) {
 	m := &Machine{}
 	_ = m.BeginSetup()
+	_ = m.SetProject(testProjID, epoch)
 	if err := m.SetCategory("", epoch); err == nil {
 		t.Fatal("expected error for empty categoryID")
 	}
@@ -107,8 +109,8 @@ func TestBeginSetupWrongState(t *testing.T) {
 
 func TestSetDurationZero(t *testing.T) {
 	m := &Machine{}
-	_ = m.SetCategory(testCatID, epoch)
 	_ = m.SetProject(testProjID, epoch)
+	_ = m.SetCategory(testCatID, epoch)
 	if err := m.SetDuration(0, epoch); err == nil {
 		t.Fatal("expected error for zero duration")
 	}
@@ -373,8 +375,8 @@ func TestNewSession(t *testing.T) {
 	if err := m.NewSession(now.Add(27 * time.Minute)); err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if m.State() != StateSetupCategory {
-		t.Fatalf("want SetupCategory, got %s", m.State())
+	if m.State() != StateSetupProject {
+		t.Fatalf("want SetupProject, got %s", m.State())
 	}
 	if m.CategoryID() != "" || m.ProjectID() != "" {
 		t.Error("NewSession should clear category and project")
@@ -454,5 +456,169 @@ func TestToStoreSessionInputBeforeEnd(t *testing.T) {
 	_ = now
 	if err == nil {
 		t.Fatal("expected error before End is called")
+	}
+}
+
+func TestSetProjectEmpty(t *testing.T) {
+	m := &Machine{}
+	now := epoch
+	_ = m.BeginSetup()
+
+	if err := m.SetProject("", now); err != nil {
+		t.Fatalf("SetProject empty: %v", err)
+	}
+	if m.State() != StateSetupCategory {
+		t.Errorf("want SetupCategory, got %s", m.State())
+	}
+	if m.ProjectID() != "" {
+		t.Errorf("ProjectID = %q, want empty", m.ProjectID())
+	}
+}
+
+// --- Snapshot / Hydrate ---
+
+func TestSnapshotRoundTripActive(t *testing.T) {
+	m, now := setupToActive(t, 25)
+	capAt := now.Add(5 * time.Minute)
+	_ = m.AddCapture("buy milk", capAt)
+
+	snapAt := now.Add(10 * time.Minute)
+	snap, err := m.Snapshot(snapAt, "MyProject", "Coding")
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	if snap.State != "active" {
+		t.Errorf("snap.State = %q, want active", snap.State)
+	}
+	if snap.SessionID != m.SessionID() {
+		t.Errorf("snap.SessionID = %q, want %q", snap.SessionID, m.SessionID())
+	}
+	if snap.ProjectName != "MyProject" {
+		t.Errorf("snap.ProjectName = %q, want MyProject", snap.ProjectName)
+	}
+	if len(snap.Captures) != 1 {
+		t.Fatalf("len(snap.Captures) = %d, want 1", len(snap.Captures))
+	}
+
+	m2, err := Hydrate(snap, snapAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	if m2.State() != StateActive {
+		t.Errorf("hydrated state = %s, want Active", m2.State())
+	}
+	if m2.CategoryID() != testCatID {
+		t.Errorf("CategoryID = %q, want %q", m2.CategoryID(), testCatID)
+	}
+	if m2.ProjectID() != testProjID {
+		t.Errorf("ProjectID = %q, want %q", m2.ProjectID(), testProjID)
+	}
+	if m2.PlannedMin() != 25 {
+		t.Errorf("PlannedMin = %d, want 25", m2.PlannedMin())
+	}
+	if len(m2.Captures()) != 1 {
+		t.Fatalf("len(Captures) = %d, want 1", len(m2.Captures()))
+	}
+	if m2.Captures()[0].Text != "buy milk" {
+		t.Errorf("Captures[0].Text = %q", m2.Captures()[0].Text)
+	}
+}
+
+func TestSnapshotRoundTripPaused(t *testing.T) {
+	m, now := setupToActive(t, 25)
+
+	pauseAt := now.Add(10 * time.Minute)
+	_ = m.Pause(pauseAt)
+
+	snapAt := now.Add(12 * time.Minute)
+	snap, err := m.Snapshot(snapAt, "Proj", "Cat")
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	if snap.State != "paused" {
+		t.Errorf("snap.State = %q, want paused", snap.State)
+	}
+	if snap.CurrentPauseStart == 0 {
+		t.Error("expected CurrentPauseStart set for paused state")
+	}
+	if len(snap.Pauses) != 0 {
+		t.Errorf("expected no completed pauses, got %d", len(snap.Pauses))
+	}
+
+	m2, err := Hydrate(snap, snapAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	if m2.State() != StatePaused {
+		t.Errorf("hydrated state = %s, want Paused", m2.State())
+	}
+}
+
+func TestSnapshotWhileIdle(t *testing.T) {
+	m := &Machine{}
+	_, err := m.Snapshot(epoch, "", "")
+	if err == nil {
+		t.Fatal("expected error for Snapshot in Idle state")
+	}
+}
+
+func TestHydratePausedWithoutCurrentPauseStart(t *testing.T) {
+	s := recovery.Sentinel{
+		SessionID:          "s",
+		CategoryID:         "c",
+		PlannedDurationMin: 25,
+		StartedAt:          epoch.Add(-10 * time.Minute).Unix(),
+		TargetEndAt:        epoch.Add(15 * time.Minute).Unix(),
+		Pauses:             []recovery.PauseRecord{},
+		State:              "paused",
+		// CurrentPauseStart deliberately omitted
+	}
+	_, err := Hydrate(s, epoch)
+	if err == nil {
+		t.Fatal("expected error: paused state without current_pause_start")
+	}
+}
+
+func TestHydrateInvalidState(t *testing.T) {
+	s := recovery.Sentinel{
+		SessionID:          "s",
+		CategoryID:         "c",
+		PlannedDurationMin: 25,
+		StartedAt:          epoch.Add(-10 * time.Minute).Unix(),
+		TargetEndAt:        epoch.Add(15 * time.Minute).Unix(),
+		State:              "idle",
+	}
+	_, err := Hydrate(s, epoch)
+	if err == nil {
+		t.Fatal("expected error for invalid state")
+	}
+}
+
+func TestSnapshotWithCompletedPause(t *testing.T) {
+	m, now := setupToActive(t, 30)
+
+	// complete one pause interval
+	_ = m.Pause(now.Add(5 * time.Minute))
+	_ = m.Resume(now.Add(8 * time.Minute))
+
+	snap, err := m.Snapshot(now.Add(10*time.Minute), "", "")
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Pauses) != 1 {
+		t.Fatalf("expected 1 completed pause, got %d", len(snap.Pauses))
+	}
+	if snap.CurrentPauseStart != 0 {
+		t.Error("expected CurrentPauseStart to be 0 in Active state")
+	}
+
+	m2, err := Hydrate(snap, now.Add(10*time.Minute+time.Second))
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	if m2.State() != StateActive {
+		t.Errorf("want Active, got %s", m2.State())
 	}
 }

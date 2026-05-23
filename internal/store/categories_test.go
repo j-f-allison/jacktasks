@@ -10,15 +10,23 @@ func TestCreateCategory(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	c, err := s.CreateCategory(ctx, "RELAC")
+	proj, err := s.CreateProject(ctx, "RELAC")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	c, err := s.CreateCategory(ctx, "Coding", proj.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if c.ID == "" {
 		t.Fatal("expected non-empty ID")
 	}
-	if c.Name != "RELAC" {
-		t.Errorf("Name = %q, want %q", c.Name, "RELAC")
+	if c.Name != "Coding" {
+		t.Errorf("Name = %q, want %q", c.Name, "Coding")
+	}
+	if c.ProjectID != proj.ID {
+		t.Errorf("ProjectID = %q, want %q", c.ProjectID, proj.ID)
 	}
 	if c.CreatedAt.IsZero() || c.UpdatedAt.IsZero() {
 		t.Error("timestamps not set")
@@ -31,29 +39,48 @@ func TestCreateCategory(t *testing.T) {
 	}
 }
 
-func TestListCategories(t *testing.T) {
+func TestCreateCategoryNoProject(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	list, err := s.ListCategories(ctx)
+	c, err := s.CreateCategory(ctx, "Misc", "")
+	if err != nil {
+		t.Fatalf("create no-project category: %v", err)
+	}
+	if c.ProjectID != "" {
+		t.Errorf("ProjectID = %q, want empty", c.ProjectID)
+	}
+}
+
+func TestListCategoriesByProject(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	relac, _ := s.CreateProject(ctx, "RELAC")
+	jdi, _ := s.CreateProject(ctx, "JDi")
+
+	list, err := s.ListCategoriesByProject(ctx, relac.ID)
 	if err != nil {
 		t.Fatalf("list empty: %v", err)
 	}
 	if len(list) != 0 {
-		t.Errorf("expected empty list, got %d", len(list))
+		t.Errorf("expected empty, got %d", len(list))
 	}
 
-	for _, n := range []string{"JDi", "RELAC", "Apex"} {
-		if _, err := s.CreateCategory(ctx, n); err != nil {
-			t.Fatalf("create %q: %v", n, err)
+	for _, n := range []string{"Coding", "Planning", "Admin"} {
+		if _, err := s.CreateCategory(ctx, n, relac.ID); err != nil {
+			t.Fatalf("create relac %q: %v", n, err)
 		}
 	}
-
-	list, err = s.ListCategories(ctx)
-	if err != nil {
-		t.Fatalf("list: %v", err)
+	if _, err := s.CreateCategory(ctx, "Research", jdi.ID); err != nil {
+		t.Fatalf("create jdi: %v", err)
 	}
-	want := []string{"Apex", "JDi", "RELAC"}
+
+	list, err = s.ListCategoriesByProject(ctx, relac.ID)
+	if err != nil {
+		t.Fatalf("list relac: %v", err)
+	}
+	want := []string{"Admin", "Coding", "Planning"}
 	if len(list) != len(want) {
 		t.Fatalf("got %d categories, want %d", len(list), len(want))
 	}
@@ -61,6 +88,17 @@ func TestListCategories(t *testing.T) {
 		if c.Name != want[i] {
 			t.Errorf("list[%d].Name = %q, want %q", i, c.Name, want[i])
 		}
+		if c.ProjectID != relac.ID {
+			t.Errorf("list[%d].ProjectID = %q, want %q", i, c.ProjectID, relac.ID)
+		}
+	}
+
+	jdiList, err := s.ListCategoriesByProject(ctx, jdi.ID)
+	if err != nil {
+		t.Fatalf("list jdi: %v", err)
+	}
+	if len(jdiList) != 1 || jdiList[0].Name != "Research" {
+		t.Errorf("unexpected jdi categories: %+v", jdiList)
 	}
 }
 
@@ -68,7 +106,8 @@ func TestGetCategory(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	created, err := s.CreateCategory(ctx, "RELAC")
+	proj, _ := s.CreateProject(ctx, "RELAC")
+	created, err := s.CreateCategory(ctx, "Coding", proj.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -83,5 +122,37 @@ func TestGetCategory(t *testing.T) {
 
 	if _, err := s.GetCategory(ctx, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("got err %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateOrGetCategoryByName(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// First call: inserts
+	c1, err := s.CreateOrGetCategoryByName(ctx, "email", "")
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if c1.ID == "" {
+		t.Fatal("expected non-empty ID")
+	}
+
+	// Second call with same name: returns existing row
+	c2, err := s.CreateOrGetCategoryByName(ctx, "email", "")
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if c2.ID != c1.ID {
+		t.Errorf("got id %q, want %q (should reuse)", c2.ID, c1.ID)
+	}
+
+	// Different name: new row
+	c3, err := s.CreateOrGetCategoryByName(ctx, "coding", "")
+	if err != nil {
+		t.Fatalf("third call: %v", err)
+	}
+	if c3.ID == c1.ID {
+		t.Error("different name should produce different row")
 	}
 }

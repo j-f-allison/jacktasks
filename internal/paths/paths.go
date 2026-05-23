@@ -29,3 +29,8 @@ func DBPath() (string, error) {
 	}
 	return filepath.Join(dir, "jacktasks.db"), nil
 }
+
+// DBPathFromDir returns the SQLite path given an already-resolved data dir.
+func DBPathFromDir(dir string) string {
+	return filepath.Join(dir, "jacktasks.db")
+}

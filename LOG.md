@@ -120,11 +120,15 @@ Goal: pure session state machine + thin stdin driver. No Bubble Tea yet.
 | 1 | Data layer with tests | ✅ closed |
 | 2 | Core session loop with stdin prompts | ✅ closed |
 | 3 | Bubble Tea TUI replacing prompts | ✅ closed |
-| 4 | Reminders integration | ⬜ next |
-| 5 | Crash recovery / state persistence | ⬜ |
-| 6 | Sync service + client | ⬜ |
+| 4 | Reminders integration | ✅ closed |
+| — | Design fix: invert project ↔ category | ✅ closed |
+| 5 | Crash recovery / state persistence | ✅ closed |
+| 5.5 | TUI polish (Lipgloss + Bubbles components) | ⬜ next |
+| 6a | Sync protocol design + server skeleton | ⬜ |
+| 6b | Client `jacktasks sync` subcommand | ⬜ |
+| 6c | Deploy ThinkCentre + verify cross-Mac | ⬜ |
 
-Time estimate: ~6–9 more sessions across Phases 4–6.
+Time estimate: Phase 5 + 5.5 in today's session to enable a daily-driver trial on the MacBook. Phase 6 split across 3 mid-week sessions once real data exists to validate against.
 
 ---
 
@@ -164,3 +168,338 @@ TUI impact: project selection screen gets a permanent "no project" option. Activ
 **Decided: "Do" action on captures routes to normal session setup, not a pre-filled project name.**
 
 On the What-Next capture disposition screen, "Do" marks the capture cleared and starts a new session setup flow (category → optional project → duration). The capture text is shown as context but doesn't pre-fill any field — user picks category, then picks a project, creates one, or skips ("no project"). This keeps the setup flow consistent and avoids the UX confusion of auto-naming a project from freeform capture text.
+
+---
+
+## 2026-05-23 — Phase 4: Reminders integration
+
+Goal: nullable `project_id`, capture disposition, Reminders push, inbox pull on launch.
+
+**Done:**
+- **Schema migration:** `sessions.project_id` made nullable. `migrateSessionsProjectIDNullable` in `store.go` detects the old NOT NULL schema via `PRAGMA table_info` and rebuilds the table in a single-connection transaction (required to keep `PRAGMA foreign_keys=OFF` in scope). Migration is idempotent. New test `TestMigrateSessionsProjectIDNullable` exercises the full old-schema → migration → new-schema path.
+- **Go layer:** `CreateSession` and `scanSession` updated to treat empty string as NULL for `project_id` (same pattern as `end_notes`). `CreateCapture` signature changed to accept an explicit `id` parameter so session-layer UUIDs align with DB IDs — needed for capture disposition lookups.
+- **Session machine:** `SetProject("")` now valid (no-project is a legitimate choice, not an error).
+- **TUI — "no project":** Project selection screen shows `0) — no project`. Active/paused display and resume offer show `—` when project is empty. `checkResume` handles no-project sessions without calling `GetProject`.
+- **`internal/reminders/`:** New package. `Client` interface with `ListInbox`, `Add`, `Complete`. `eventkitClient` wraps `go-eventkit`. `Fake` for tests. 4 tests.
+- **Capture disposition on WhatNext:** `c<n>` (clear), `r<n>` (send to Reminders), `d<n>` (do/start session for capture). Optimistic UI — captures disappear from display immediately, reappear on error. `capturesDisposed` map tracks state per WhatNext visit. `d<n>` saves capture text to `doContextText`, shown as dim context during the subsequent setup flow.
+- **Startup screen:** `uiExtraStart` replaces the old resume y/N prompt. Async inbox fetch via `loadInboxCmd` (fires in `Init`). While loading: "Checking inbox…". On load: numbered inbox items, resume option (if applicable), `n` for new session, `q` to quit. If inbox loads empty and no resume: skips directly to category setup. EventKit failure non-fatal — logs to stderr, proceeds without inbox option. `completeInboxItemCmd` marks selected inbox item done in EventKit.
+- 48 tests passing.
+
+**Trade-offs explicitly accepted:**
+- `PRAGMA foreign_keys=OFF` during migration: the rebuild runs inside a transaction on a dedicated `*sql.Conn` to keep the pragma in scope. The `database/sql` pool would scatter it across connections otherwise.
+- Capture disposition writes to the DB asynchronously after the user acts. There's a narrow window where a force-quit could leave a capture undisposed in the DB (cleared in the TUI but not marked in the store). Phase 5 crash recovery will close this gap.
+- Inbox item completion (`completeInboxItemCmd`) is fire-and-forget; failures are silently discarded. If EventKit rejects the complete, the item stays in Reminders. Acceptable for V1.
+- `sendToRemindersCmd` creates the Reminders item first, then marks the DB flag. If the DB write fails after a successful Reminders write, the item is in Reminders but not flagged. Unlikely in practice; logged via error rollback on the TUI.
+- `doContextText` persists in the model until the next session starts; it doesn't flow into the session record itself, only into the display. This is intentional — the capture text is context for the user, not a field on the session.
+
+---
+
+## 2026-05-23 — Pre-Phase-5 design fix: invert project ↔ category
+
+After hands-on testing of the Phase 4 build, the user identified that the project/category relationship is backwards. Categories were modeled as global (a top-level taxonomy), with projects as children of a category. The intended model is the opposite: **projects are the top-level grouping; categories are per-project sub-labels.** "Coding" or "Planning" only makes sense in the context of a specific project.
+
+This decision predates implementation — the cleanup happens before Phase 5 (crash recovery) starts. Local dev DB will be dropped and recreated; no migration code needed.
+
+**New model:**
+
+```sql
+projects    (id, name, created_at, updated_at, deleted_at?, archived)
+                                                      -- no category_id
+categories  (id, name, project_id→projects, created_at, updated_at, deleted_at?, archived)
+                                                      -- project_id NULLABLE; NULL = no-project category
+sessions    (id, project_id→projects, category_id→categories NOT NULL, ...)
+                                                      -- project_id nullable, category_id always set
+```
+
+**The "no project" / category rules** (subtle — read carefully):
+
+- **"No project" is a valid, permanent option** on the project selection screen. Some sessions are genuinely project-less.
+- **Category is always required**, regardless of whether a project was selected. There is no "no category" path.
+- **When a project is selected**: the category screen shows the pre-populated list of existing categories *for that project* plus an `n` option to create a new one. Categories are scoped to their project — picking project "jacktasks" does not surface categories from project "homelab".
+- **When "no project" is selected**: the category screen does **not** show a list. The user always types a name (or it's prefilled from a capture/reminder text — see below). The category row is stored with `project_id IS NULL`. These no-project categories are never offered as a pickable list on subsequent runs; each no-project session re-enters its category fresh.
+  - Backend dedup: when a no-project category name is entered, do a lookup on `(name, project_id IS NULL)` — reuse the existing row if found, otherwise insert a new one. Keeps the data clean for later analytics without surfacing a list in the UI.
+- **Prefill from capture/reminder**: when the session was started via "Do" on a capture or by selecting an inbox reminder, the capture/reminder text prefills the category name input on the category screen. User can accept it as-is or edit before submitting. This applies in both the project-selected and no-project paths, but in the project-selected path the prefill goes into the "new category" input that appears after pressing `n` (or you can extend it to prefill on the list screen too — implementer's call, flag if uncertain).
+
+**Setup flow:** `Idle → SetupProject → SetupCategory → SetupDuration → Active`. SetupCategory is **never skipped**. What differs between the project-selected and no-project paths is the *UI on the SetupCategory screen* (list vs. free-text-only), not the state machine.
+
+**Plan of work** (for the implementing session):
+
+1. **Schema (`internal/store/schema.sql`)** — rewrite to the shape above. Drop `projects.category_id`. Add `categories.project_id NOT NULL REFERENCES projects(id)`. Make `sessions.category_id` nullable. Drop `idx_projects_category`; add `idx_categories_project`. Delete the Phase-4 `migrateSessionsProjectIDNullable` block in `store.go` — the new schema starts nullable, no migration needed.
+2. **DAL**:
+   - `projects.go`: `CreateProject(ctx, name)` drops `categoryID`. Replace `ListProjectsByCategory` with `ListProjects(ctx)`. `scanProject` drops `category_id`. `store.Project` loses `CategoryID`.
+   - `categories.go`: `CreateCategory(ctx, name, projectID string)` — `projectID` may be empty for no-project categories (maps to NULL via the existing empty-string-↔-NULL pattern). Replace `ListCategories` with `ListCategoriesByProject(ctx, projectID string)` returning categories where `project_id = ?`. Add `FindCategoryByNameNoProject(ctx, name)` (or fold into a `CreateOrGetCategory` helper) for the no-project dedup-on-insert path. `scanCategory` adds `project_id` (nullable). `store.Category` gains `ProjectID` (empty string when NULL).
+   - `sessions.go`: `category_id` stays `NOT NULL` in SQL and required non-empty in `CreateSessionInput`. `project_id` keeps its existing NULL↔"" mapping. Drop the Phase-4 nullable-`project_id` migration block.
+3. **Session machine (`internal/session/session.go`)**:
+   - Reorder states: `BeginSetup()` lands in `StateSetupProject`. `SetProject(id, now)` always advances to `StateSetupCategory` (empty id is allowed and means "no project"). `SetCategory(id, now)` requires non-empty id, advances to `StateSetupDuration`.
+   - `Reset()` returns to `StateSetupProject`.
+   - End-of-session snapshot: `category_id` always non-empty, `project_id` may be empty. Assert that in `End()`.
+4. **TUI (`cmd/jacktasks/model.go`)**:
+   - On entering setup, load **projects** first. Project selection screen keeps the `0) — no project` option.
+   - **Project selected path**: fire `loadCategoriesCmd()` (now `ListCategoriesByProject(projectID)`), then show the category screen with the pre-populated list + `n` to create a new category. New-name creation: `CreateCategory(ctx, name, machine.ProjectID())`.
+   - **No-project path**: do not load a category list. Show the category screen with just an input prompt (no numbered list). The submitted name resolves via `CreateOrGetCategory(ctx, name, "")` — dedup against existing no-project categories by name; otherwise insert a new row with `project_id IS NULL`.
+   - **Capture/reminder prefill**: when `doContextText` is non-empty, prefill the category input with it on the SetupCategory screen. In the project-selected path, this means the new-category input (after pressing `n`) starts pre-populated; in the no-project path, the input itself is pre-populated. User can edit before submit. Clear `doContextText` once consumed.
+   - Active screen displays `<project or —> / <category>`. Category is never `—` (always set).
+   - `resumeInfo`: `categoryName` always present; `projectName` may be empty (renders `—`).
+   - "Do" / inbox flow: after selecting a capture or inbox item, enters `StateSetupProject` (was Category), with `doContextText` carrying the text forward to prefill the category later.
+   - View copy: project screen says "Select a project"; category screen says "Select a category for <project name>" in the project path, or "Enter a category" in the no-project path.
+5. **Tests**: rewire fixtures (`internal/store/*_test.go`) so categories are created with a project (or with empty project for the no-project case), projects no longer take a category. Add a test for `CreateOrGetCategory` dedup on the no-project path. `internal/session/session_test.go`: reorder setup tests and add tests for (a) project-selected → category-from-list flow, (b) no-project → category-typed flow, (c) `End()` invariant that `category_id` is always non-empty. Existing 48 tests are mostly mechanical name/order swaps.
+6. **Docs**: update `PROJECT.md` (Schema section, Session model state diagram, Phase-4 description — `project_id` was nullable from the start of the new schema, so the "Phase 4 migration" sentence about nullable `project_id` should be removed). Append to this LOG when done.
+7. **Local data**: user runs `rm "~/Library/Application Support/jacktasks/jacktasks.db"` before first run on the new schema.
+
+**Order of work:** schema + DAL → session machine → TUI → docs. After each step: `go build ./... && go vet ./... && go test ./...` green before moving on.
+
+**Explicitly *not* doing:**
+- No `UNIQUE(project_id, name)` constraint on categories. Name uniqueness stays a UI nicety, not a DB invariant, matching how project names are handled today.
+- No auto-created "general" category when a new project is made. The user creates the first category via `n`, same flow as today. Reconsider if it becomes annoying in real use.
+
+---
+
+## 2026-05-23 — Pre-Phase-5 design fix: invert project ↔ category (implemented)
+
+Implemented the design documented above. All changes were made in one pass; tests stayed green throughout.
+
+**What changed:**
+
+- **Schema rewritten.** `projects` is now the root table (no `category_id`). `categories` gains `project_id TEXT REFERENCES projects(id)` (nullable). `sessions.category_id` is NOT NULL; `sessions.project_id` remains nullable. Local dev DB dropped and recreated — no migration code needed or written. The Phase-4 `migrateSessionsProjectIDNullable` migration and its test were deleted.
+- **DAL.** `Project` struct drops `CategoryID`. `CreateProject(ctx, name)` — no category arg. `ListProjectsByCategory` replaced by `ListProjects`. `Category` gains `ProjectID`. `CreateCategory(ctx, name, projectID)` — projectID empty = no-project category stored as NULL. `ListCategories` replaced by `ListCategoriesByProject(ctx, projectID)`. Added `CreateOrGetCategoryByName(ctx, name, "")` for no-project dedup: looks up by `(name, project_id IS NULL)`, reuses if found, otherwise inserts.
+- **Session machine.** `BeginSetup()` → `StateSetupProject`. `SetProject` (valid from SetupProject) advances to `StateSetupCategory`. `SetCategory` requires non-empty ID, advances to `StateSetupDuration`. `NewSession()` resets to `StateSetupProject`.
+- **TUI.** Project selection is now the first setup screen. After project selection (or "no project"), category screen appears. For a selected project: shows that project's categories with "n" for new. For no-project: shows a free-text input; `doContextText` pre-populates it if set; submitting calls `CreateOrGetCategoryByName`. Active/paused display reordered to `project / category`. Resume, "New session", "Do" capture, and inbox item selection all route to `loadProjectsCmd` first.
+- **Tests.** `sessionFixtures` creates project then category-under-project. `projectsFixtures` no longer needs a parent category. Added `TestCreateOrGetCategoryByName`. Session machine tests reordered to match new state flow. 48 tests passing.
+
+**Trade-offs accepted:**
+- No-project categories are stored but never shown in a list — they accumulate silently. The dedup-by-name keeps the count reasonable, and the data is useful for analytics later. Revisit if the table grows unexpectedly.
+- `CreateOrGetCategoryByName` does a SELECT then INSERT (not an upsert). Two concurrent calls with the same name on the same device are impossible (single-user TUI), so the race window doesn't matter.
+
+---
+
+## 2026-05-23 — Plan for Phases 5, 5.5, and 6
+
+Goal: get jacktasks to a daily-driver state on the MacBook by EOD so the user can trial it for a week. Sync (Phase 6) intentionally deferred to mid-week so it can be validated against real session data.
+
+Order is fixed: **5 → 5.5 → (trial period) → 6a → 6b → 6c**. Do not reorder without surfacing it.
+
+### Phase 5 — Crash recovery / state persistence
+
+**Problem:** In-flight session state (started_at, pauses, captures, target end) lives only in `session.Machine`. A crash, terminal close, or accidental `q` during Active/Paused loses the session entirely — nothing is written to SQLite until `End()`.
+
+**Solution:** An `active.json` sentinel file in the data dir, written on every meaningful state transition. On startup, if it exists and references a session UUID not yet in the DB, offer to recover.
+
+**Filesystem path:** `~/Library/Application Support/jacktasks/active.json` (already listed in PROJECT.md's filesystem table).
+
+**Sentinel contents** (JSON):
+```json
+{
+  "session_id":          "uuid",
+  "project_id":          "uuid or empty",
+  "project_name":        "display only, denormalized",
+  "category_id":         "uuid",
+  "category_name":       "display only, denormalized",
+  "planned_duration_min": 25,
+  "started_at":          1716480000,
+  "target_end_at":       1716481500,
+  "pauses":              [{"start": 1716480300, "end": 1716480360}, ...],
+  "current_pause_start": 1716480400,  // present only if state == Paused
+  "captures":            [{"id": "uuid", "text": "...", "captured_at": 1716480200}, ...],
+  "state":               "active" | "paused",
+  "written_at":          1716480450
+}
+```
+
+Denormalized names so the recover prompt can render without DB lookups (project/category may have been edited or soft-deleted).
+
+**New package: `internal/recovery/`**
+- `recovery.go`: `type Sentinel struct { ... }` matching the JSON shape. `Write(dir string, s Sentinel) error` (atomic write: temp file + rename). `Read(dir string) (*Sentinel, error)` (returns nil, nil if file absent — not an error). `Clear(dir string) error` (idempotent — no error if already gone).
+- `recovery_test.go`: round-trip write/read, atomic write doesn't corrupt on partial state, Clear-when-absent is no-op, Read-when-malformed returns explicit error.
+
+**Session machine changes (`internal/session/session.go`):**
+- Add `Snapshot() Sentinel` method on `Machine` — pure, builds the sentinel from current state. Only valid in `StateActive` or `StatePaused`; returns zero value + error otherwise.
+- Add `Hydrate(s Sentinel, now time.Time) (*Machine, error)` constructor — rebuilds a `Machine` in `StateActive` or `StatePaused`. Validates that started_at ≤ now and that current_pause_start (if set) is consistent with `state == "paused"`.
+- Do **not** auto-persist from inside the session package — it stays pure I/O-free. The TUI is responsible for calling `Snapshot()` and writing it via the recovery package.
+
+**TUI changes (`cmd/jacktasks/model.go`):**
+- After every transition into or within Active/Paused, and after each `upn`/`ext`/`pause`/`resume`, call `recovery.Write(dataDir, m.machine.Snapshot())` as a `tea.Cmd`. Errors logged to stderr but non-fatal — recovery is best-effort.
+- On clean session end (after the DB write in `saveSessionCmd` succeeds), call `recovery.Clear(dataDir)`.
+- On startup, before the existing inbox/resume start screen logic: call `recovery.Read(dataDir)`. If non-nil **and** the session UUID is not found in the DB (use `GetSession` returning `ErrNotFound`), show a new pre-start screen:
+  ```
+  Recover unfinished session?
+
+  <project> / <category> — started 14m ago, N captures
+  Planned: 25m   Elapsed (working): 12m
+
+  y) Resume        n) Discard
+  ```
+  - `y` → hydrate the machine, jump straight to `StateActive` (or `StatePaused` if that's what the sentinel said). The recover-on-restart resume-from-`ended_early` feature is unrelated and unaffected.
+  - `n` → call `recovery.Clear`, proceed to normal startup.
+- If `Read` returns a sentinel whose UUID **is** in the DB, the previous run completed cleanly but crashed before `Clear` — silently clear the file and proceed normally.
+
+**Tests:**
+- `recovery` package: round-trip, atomic-write, clear-when-absent, malformed-read.
+- `session` package: `Snapshot()` round-trip via `Hydrate()` (build machine → snapshot → hydrate → verify state equal). Snapshot-while-Idle returns error. Hydrate with `state="paused"` but no `current_pause_start` returns error.
+- No TUI tests (consistent with Phase 3 — TUI is glue).
+
+**Out of scope for Phase 5:**
+- Capture disposition crash recovery (the narrow window noted in the Phase 4 trade-offs). Captures live in the DB once the session ends; only the disposition flags can be lost. Acceptable for V1.
+- Sentinel versioning. Single field `"version": 1` added but no migration code. Bump only matters once we ship.
+
+### Phase 5.5 — TUI polish (bounded)
+
+**Goal:** make the daily-driver experience feel like a real Charm app, not `fmt.Sprintf` lines. No new screens, no flow changes — same state machine, prettier surface.
+
+**Allowed dependencies:** the `charmbracelet/bubbles` components already pulled in transitively (`list`, `progress`, `spinner`, `help`, `key`). No new third-party deps.
+
+**Concrete deliverables:**
+
+1. **`cmd/jacktasks/styles.go`** — new file. Single Lipgloss palette + named styles:
+   ```go
+   var (
+     StyleTitle    = lipgloss.NewStyle()...
+     StyleSubtitle = ...
+     StyleDim      = ...
+     StyleAccent   = ...
+     StyleError    = ...
+     StyleKeyHint  = ...
+     StyleSelected = ...
+     StyleHeader   = ...
+     StyleFooter   = ...
+   )
+   ```
+   One place to retune colors. Use `lipgloss.AdaptiveColor` for light/dark terminal support.
+
+2. **Persistent header + footer** (rendered in every `View()`):
+   - Header: app name on the left, current screen name in the middle, when in Active/Paused: `<project> / <category> — MM:SS / planned`.
+   - Footer: context-sensitive key hints rendered via `bubbles/help` (`?` toggles short/full). Each screen exposes a `keyMap` for help to render.
+
+3. **`bubbles/list` for selection screens:**
+   - Project select, category select (project-selected path only), what-next actions, capture disposition list.
+   - Keep numeric shortcuts working (`1`-`9` jumps to that item). Add arrow nav, filter-as-you-type, proper selection highlight.
+   - The no-project category screen stays free-text (no list to swap).
+   - The startup screen (inbox + resume + new) also becomes a list.
+
+4. **`bubbles/progress` for timers:**
+   - Active timer: progress bar from 0 → planned duration, with `MM:SS / MM:SS` overlay. Shifts beyond 100% when over-time (use a different style past 100%).
+   - Break countdown: same, 0 → 5 min.
+
+5. **`bubbles/spinner` for async ops:**
+   - "Checking inbox…" on startup.
+   - "Saving session…" briefly on what-next entry (the async DB write window).
+
+6. **`bubbles/help` for `?` toggle:**
+   - Short help in footer by default. `?` toggles full help (multi-line). Each screen's `keyMap` declares its bindings.
+
+**What does NOT change in Phase 5.5:**
+- State machine. Same states, same transitions.
+- Session package. No changes.
+- DAL. No changes.
+- Screen flow / order. Same.
+
+**Tests:** none added. TUI stays untested by design.
+
+### Phase 6 — Sync (mid-week, after a few days of trial use)
+
+Split into three sub-phases so each is one session.
+
+**Phase 6a — Protocol design + server skeleton**
+
+**New repo dir:** `cmd/jacktasks-sync/` (server binary). **Or** new repo entirely — flag for user when starting 6a. Default to same repo, sub-command of the same module.
+
+**Storage:** `/var/lib/jacktasks-sync/master.db` on the ThinkCentre. Same schema as the client DB (reuse `internal/store/schema.sql`).
+
+**Auth:** shared bearer token via `JACKTASKS_SYNC_TOKEN` env var. Bind to Tailscale interface only (`tailscale0` or the Tailscale IP).
+
+**Protocol (REST, JSON):**
+
+```
+GET  /healthz                              → 200 OK
+POST /push?table=<name>                    → body: {"rows": [...]}
+                                             returns: {"accepted": N, "rejected": [...]}
+GET  /pull?table=<name>&since=<unix_sec>   → returns: {"rows": [...], "as_of": <unix_sec>}
+```
+
+Tables synced: `projects`, `categories`, `sessions`, `captures`. Not synced: `config` (per-device device_id), `sync_state` (per-device bookkeeping).
+
+**Conflict rules:**
+- `sessions`, `captures`: pure append. Insert-or-ignore by UUID on both sides.
+- `projects`, `categories`: last-write-wins on `updated_at`. `deleted_at` tombstone wins over any update with earlier `updated_at`. On push: server compares incoming `updated_at` to its row; takes newer. On pull: client does the same.
+- Capture mutable flags (`cleared`, `sent_to_reminders`): treat as last-write-wins on a new `updated_at` column on captures. **Schema change needed** — add `captures.updated_at INTEGER NOT NULL DEFAULT 0` via a real migration (first migration since Phase 4). Surface this when 6a starts.
+
+**Wire format (per row):** flat JSON object matching the table columns. Timestamps as Unix seconds. NULLs as JSON null (not empty string — wire format is stricter than the Go ↔ SQL boundary).
+
+**Deliverables for 6a:**
+- `cmd/jacktasks-sync/main.go`: HTTP server, auth middleware, the four routes.
+- `internal/syncproto/`: shared types (`PushRequest`, `PushResponse`, `PullResponse`, per-table row structs) used by both server and client.
+- `internal/syncserver/`: handler logic, conflict resolution, idempotent inserts.
+- Captures `updated_at` migration + DAL update + test.
+- Document the wire format in a new `## Sync protocol` section of `PROJECT.md` *before* writing the code.
+
+**Phase 6b — Client `jacktasks sync` subcommand**
+
+- Subcommand parsing in `cmd/jacktasks/main.go`: `jacktasks` (TUI, default) vs `jacktasks sync` (one-shot).
+- Reads `JACKTASKS_SYNC_URL` and `JACKTASKS_SYNC_TOKEN` from env. Errors clearly if missing.
+- For each table: read `sync_state.last_push_at`, push rows with `updated_at > last_push_at` (or `created_at` for append-only tables). On success, update `last_push_at`. Then read `last_pull_at`, GET `/pull?since=last_pull_at`, apply rows per conflict rules, update `last_pull_at` to server's `as_of`.
+- Push before pull (so local changes are visible to remote on next iteration).
+- Output: a short summary per table — `projects: pushed 2, pulled 0`. Errors are fatal — partial sync is fine (the state is updated as each table completes).
+- Tests: in-memory HTTP server (`httptest`), drive a push/pull/conflict scenario per table.
+
+**Phase 6c — Deploy + cross-Mac verification**
+
+- Build server binary on MacBook for `linux/amd64`.
+- `scp` to ThinkCentre. systemd unit at `/etc/systemd/system/jacktasks-sync.service`. Env file with the token. `systemctl enable --now`.
+- From MacBook: `jacktasks sync` → check master DB has the rows.
+- From Mac Mini (first run): bootstrap the local DB, then `jacktasks sync` → confirm pull lands MacBook's data.
+- Run a session on Mac Mini, sync, run a session on MacBook, sync, verify both sides converge.
+- Document the deploy steps in `PROJECT.md` under a new `## Deployment` section.
+
+### What goes into V1.0 vs. V1.1
+
+V1 ships after Phase 6c. The "out of V1" list in `PROJECT.md` stays out. If anything from that list bites during the week of trial, log it but don't implement.
+
+### Implementation handoff notes
+
+- Work strictly in phase order: 5 → 5.5 → (stop, hand back for trial) → 6.
+- After each phase: `go build ./... && go vet ./... && go test ./...` green. Then ask whether to update `PROJECT.md` / append a `LOG.md` entry (per `CLAUDE.md`).
+- Match existing patterns documented in `CLAUDE.md` — error wrapping, UUIDs, epoch seconds, `scanX` helpers, input structs, `t.Helper()` in test helpers.
+- Do not auto-update `LOG.md` for sub-phase progress. Append once Phase 5 closes; again once 5.5 closes; etc.
+- The user wants daily-driver readiness by EOD on Phase 5 + 5.5 only. Stop and hand back after 5.5 — do not start Phase 6 in the same session.
+
+---
+
+## 2026-05-23 — Phase 5: Crash recovery
+
+Goal: persist in-flight session state so a crash, terminal close, or accidental quit doesn't lose the session.
+
+**Done:**
+
+- **`internal/recovery/`** — new package. `Sentinel` struct (JSON, epoch seconds, denormalized names). `Write` (atomic temp+rename), `Read` (nil,nil if absent), `Clear` (idempotent). 6 tests: round-trip, read-absent, clear-when-absent, clear-removes-file, malformed-read, no-stray-tmp.
+- **`internal/paths/`** — added `DBPathFromDir(dir string) string` so `main.go` can call `DataDir()` once and derive the DB path without a second call.
+- **`internal/session/`** — `Snapshot(now, projName, catName)` serializes Active/Paused state into a `recovery.Sentinel`; errors on any other state. `Hydrate(sentinel, now)` reconstructs a `Machine`; validates paused-state has `CurrentPauseStart`, validates `started_at < now`. 6 new tests: active round-trip, paused round-trip, snapshot-while-idle errors, hydrate-paused-without-pause-start errors, hydrate-invalid-state, snapshot-with-completed-pause.
+- **`cmd/jacktasks/model.go`** — `dataDir` field on Model. Recovery check in `newModel` (sync: file read + DB lookup): if sentinel found and UUID not in DB, show `uiExtraRecover` screen; if UUID in DB, silently clear. `uiExtraRecover` screen shows project/category, started-N-min-ago, capture count, planned duration; y/n input. `y` hydrates and jumps to Active/Paused. `n` clears sentinel and runs normal startup (resume check + start screen or project selection). `writeSentinelCmd()` called after: `SetDuration` (enters Active), `upn`, `ext`, `pause`, `resume`, `ContinueSession`, ended_early resume (start screen `r`), crash-recovery `y`. `clearSentinelCmd()` called in `sessionSavedMsg` handler after successful DB write. Both are best-effort (errors → stderr, not shown in TUI).
+
+**Result:** all 5 packages pass (paths, recovery, reminders, session, store). Build and vet clean.
+
+**Trade-offs accepted:**
+- Sentinel write is async (tea.Cmd), so there's a brief window between a state change and the write completing. This is a best-effort feature — it closes the large crash window (multi-minute sessions) not the microsecond one.
+- `recovery.Read` errors in `newModel` are logged to stderr. The TUI is not yet running so we can't show them in-band; they're non-fatal regardless.
+- Sentinel is not versioned beyond `"version": 1`. No migration code exists. A future format change would need a version check in `Read`; deferred until needed.
+
+---
+
+## 2026-05-23 — Phase 5.5: TUI polish
+
+Goal: make the daily-driver experience feel like a real Charm app. No state-machine or flow changes.
+
+**Done:**
+
+- **`cmd/jacktasks/styles.go`** — new file. Lipgloss palette using `AdaptiveColor` (light/dark terminal support). Named styles: `StyleTitle`, `StyleAccent`, `StyleDim`, `StyleError`, `StyleSelected`, `StyleCursor`, `StyleHeader`, `StyleFooter`, `StyleTimer`, `StyleActive`, `StylePaused`, `StyleBorder`. Key bindings and per-screen `screenKeyMap` structs implementing `help.KeyMap`.
+- **Persistent header** — rendered on every screen. Three-column layout: `jacktasks` (left) / screen name (center) / `project/category MM:SS/planned` (right, Active/Paused only). Separated from content by a `─` rule sized to terminal width.
+- **Persistent footer** — `─` rule + key hints. Active/Paused screens render plain-text command hints (`upn <text>  ext <n>  pause  end`) because those commands are free-typed and `bubbles/help` skips bindings with no key triggers. All other screens use `bubbles/help` (arrow nav + Enter + ^C).
+- **Arrow-key cursor on list screens** — project select, category select (project path), what-next actions, start screen (inbox + resume + new + quit). `↑/↓` or `k/j` moves a `▶` cursor. Pressing Enter with an empty text input submits the cursor item. Numeric shortcuts preserved.
+- **`bubbles/progress` bar** — Active (0→planned, smooth gradient), Paused (same, static while paused), Break (0→5min). Animated via `progress.FrameMsg`. Width tracks terminal width.
+- **`bubbles/spinner`** — "Checking inbox..." during startup inbox fetch; "Saving session..." briefly on WhatNext while the DB write is in flight. `savingSession bool` flag on the model gates display and spinner ticks.
+- **New indirect dep** — `github.com/charmbracelet/harmonica v0.2.0`, required by `bubbles/progress`. Added to `go.sum`; no new direct `go.mod` entry.
+
+**Result:** all 5 packages pass. Build and vet clean. TUI manually verified via tmux: project/category selection with cursor nav, active session with progress bar and footer hints, break countdown, what-next screen, end flow.
+
+**Trade-offs accepted:**
+- No `bubbles/list` component. The plan specified it but the numeric-plus-cursor approach achieves the same UX with less structural change and keeps the existing handler logic intact. The cursor gives visual selection feedback; arrows give keyboard nav; numbers give power-user shortcuts. `bubbles/list` would have required replacing the entire input model per screen — more churn than value.
+- `bubbles/help` is not used for Active/Paused footers because the component skips bindings that have no key triggers (our commands are free-typed strings, not key bindings). Plain-text footer is functionally equivalent and cleaner.
+- Progress bar shows 0% at session start even though one second has elapsed. The `SetPercent` call fires on the first tick; the sub-second gap is imperceptible.

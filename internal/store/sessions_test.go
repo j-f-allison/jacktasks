@@ -7,17 +7,17 @@ import (
 	"time"
 )
 
-// sessionFixtures creates a category + project for session tests.
+// sessionFixtures creates a project + category for session tests.
 func sessionFixtures(t *testing.T, s *Store) (catID, projID string) {
 	t.Helper()
 	ctx := context.Background()
-	cat, err := s.CreateCategory(ctx, "RELAC")
-	if err != nil {
-		t.Fatalf("fixture category: %v", err)
-	}
-	proj, err := s.CreateProject(ctx, "memo", cat.ID)
+	proj, err := s.CreateProject(ctx, "memo")
 	if err != nil {
 		t.Fatalf("fixture project: %v", err)
+	}
+	cat, err := s.CreateCategory(ctx, "Coding", proj.ID)
+	if err != nil {
+		t.Fatalf("fixture category: %v", err)
 	}
 	return cat.ID, proj.ID
 }
@@ -99,6 +99,37 @@ func TestCreateSessionInvalidProject(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected FK error for invalid project_id, got nil")
+	}
+}
+
+func TestCreateSessionNoProject(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	catID, _ := sessionFixtures(t, s)
+
+	sess, err := s.CreateSession(ctx, CreateSessionInput{
+		CategoryID:         catID,
+		ProjectID:          "",
+		PlannedDurationMin: 25,
+		ActualDurationSec:  1500,
+		StartedAt:          time.Now().Add(-25 * time.Minute),
+		EndedAt:            time.Now(),
+		Status:             SessionCompleted,
+		DeviceID:           "macbook-test",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if sess.ProjectID != "" {
+		t.Errorf("ProjectID = %q, want empty string", sess.ProjectID)
+	}
+
+	got, err := s.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ProjectID != "" {
+		t.Errorf("roundtrip ProjectID = %q, want empty string", got.ProjectID)
 	}
 }
 

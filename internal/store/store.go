@@ -16,9 +16,8 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens (or creates) the database at path, applies pragmas, and runs
-// the schema. Safe to call on an existing DB — schema statements use
-// IF NOT EXISTS.
+// Open opens (or creates) the database at path, applies pragmas, and runs the schema.
+// Safe to call on an existing DB.
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

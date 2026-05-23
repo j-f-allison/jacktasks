@@ -34,7 +34,7 @@ func TestCreateCapture(t *testing.T) {
 	ctx := context.Background()
 	sessID := captureFixtures(t, s)
 
-	c, err := s.CreateCapture(ctx, sessID, "email the prof about the deadline")
+	c, err := s.CreateCapture(ctx, "", sessID, "email the prof about the deadline")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestCreateCaptureRequiresText(t *testing.T) {
 	ctx := context.Background()
 	sessID := captureFixtures(t, s)
 
-	if _, err := s.CreateCapture(ctx, sessID, ""); err == nil {
+	if _, err := s.CreateCapture(ctx, "", sessID, ""); err == nil {
 		t.Fatal("expected error for empty text, got nil")
 	}
 }
@@ -66,7 +66,7 @@ func TestCreateCaptureInvalidSession(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := s.CreateCapture(ctx, "no-such-session", "orphan"); err == nil {
+	if _, err := s.CreateCapture(ctx, "", "no-such-session", "orphan"); err == nil {
 		t.Fatal("expected FK error, got nil")
 	}
 }
@@ -86,7 +86,7 @@ func TestListCapturesBySession(t *testing.T) {
 
 	texts := []string{"first thought", "second thought", "third thought"}
 	for _, txt := range texts {
-		if _, err := s.CreateCapture(ctx, sessID, txt); err != nil {
+		if _, err := s.CreateCapture(ctx, "", sessID, txt); err != nil {
 			t.Fatalf("create %q: %v", txt, err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestMarkCaptureCleared(t *testing.T) {
 	ctx := context.Background()
 	sessID := captureFixtures(t, s)
 
-	c, err := s.CreateCapture(ctx, sessID, "to be cleared")
+	c, err := s.CreateCapture(ctx, "", sessID, "to be cleared")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestMarkCaptureSentToReminders(t *testing.T) {
 	ctx := context.Background()
 	sessID := captureFixtures(t, s)
 
-	c, err := s.CreateCapture(ctx, sessID, "to be sent")
+	c, err := s.CreateCapture(ctx, "", sessID, "to be sent")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

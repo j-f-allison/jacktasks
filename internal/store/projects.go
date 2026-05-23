@@ -10,33 +10,29 @@ import (
 	"github.com/google/uuid"
 )
 
-// Project belongs to exactly one Category.
+// Project is a top-level grouping for work.
 type Project struct {
-	ID         string
-	Name       string
-	CategoryID string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	DeletedAt  *time.Time
-	Archived   bool
+	ID        string
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	DeletedAt *time.Time
+	Archived  bool
 }
 
-// CreateProject inserts a new project under the given category.
-// Returns an error if categoryID doesn't reference an existing row
-// (enforced by the SQL foreign key, not the Go layer).
-func (s *Store) CreateProject(ctx context.Context, name, categoryID string) (*Project, error) {
+// CreateProject inserts a new project and returns it fully populated.
+func (s *Store) CreateProject(ctx context.Context, name string) (*Project, error) {
 	now := time.Now()
 	p := &Project{
-		ID:         uuid.NewString(),
-		Name:       name,
-		CategoryID: categoryID,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:        uuid.NewString(),
+		Name:      name,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO projects (id, name, category_id, created_at, updated_at, archived)
-		 VALUES (?, ?, ?, ?, ?, 0)`,
-		p.ID, p.Name, p.CategoryID, p.CreatedAt.Unix(), p.UpdatedAt.Unix(),
+		`INSERT INTO projects (id, name, created_at, updated_at, archived)
+		 VALUES (?, ?, ?, ?, 0)`,
+		p.ID, p.Name, p.CreatedAt.Unix(), p.UpdatedAt.Unix(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert project: %w", err)
@@ -44,15 +40,14 @@ func (s *Store) CreateProject(ctx context.Context, name, categoryID string) (*Pr
 	return p, nil
 }
 
-// ListProjectsByCategory returns all live projects in the given category,
+// ListProjects returns all live (not deleted, not archived) projects,
 // sorted by name case-insensitively.
-func (s *Store) ListProjectsByCategory(ctx context.Context, categoryID string) ([]Project, error) {
+func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, category_id, created_at, updated_at, deleted_at, archived
+		`SELECT id, name, created_at, updated_at, deleted_at, archived
 		 FROM projects
-		 WHERE category_id = ? AND deleted_at IS NULL AND archived = 0
+		 WHERE deleted_at IS NULL AND archived = 0
 		 ORDER BY name COLLATE NOCASE`,
-		categoryID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
@@ -74,7 +69,7 @@ func (s *Store) ListProjectsByCategory(ctx context.Context, categoryID string) (
 // and archived rows. Returns ErrNotFound if no row matches.
 func (s *Store) GetProject(ctx context.Context, id string) (*Project, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, category_id, created_at, updated_at, deleted_at, archived
+		`SELECT id, name, created_at, updated_at, deleted_at, archived
 		 FROM projects WHERE id = ?`,
 		id,
 	)
@@ -94,7 +89,7 @@ func scanProject(r rowScanner) (Project, error) {
 	var deletedAt sql.NullInt64
 	var archived int
 
-	if err := r.Scan(&p.ID, &p.Name, &p.CategoryID, &createdAt, &updatedAt, &deletedAt, &archived); err != nil {
+	if err := r.Scan(&p.ID, &p.Name, &createdAt, &updatedAt, &deletedAt, &archived); err != nil {
 		return p, err
 	}
 	p.CreatedAt = time.Unix(createdAt, 0)

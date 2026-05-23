@@ -69,9 +69,9 @@ Two binaries, two stores, two sync layers — deliberately separated.
 All tables use UUID primary keys (TEXT) for sync-friendliness. Timestamps are Unix epoch seconds. `journal_mode=DELETE` (rollback journal, not WAL). Foreign keys enforced via `PRAGMA foreign_keys=ON`.
 
 ```sql
-categories  (id, name, created_at, updated_at, deleted_at?, archived)
-projects    (id, name, category_id→categories, created_at, updated_at, deleted_at?, archived)
-sessions    (id, category_id→categories, project_id?→projects,
+projects    (id, name, created_at, updated_at, deleted_at?, archived)
+categories  (id, name, project_id?→projects, created_at, updated_at, deleted_at?, archived)
+sessions    (id, project_id?→projects, category_id→categories NOT NULL,
              planned_duration_min, actual_duration_sec, started_at, ended_at,
              end_notes?, status, created_at, device_id)
 captures    (id, session_id→sessions, text, captured_at,
@@ -82,7 +82,11 @@ config      (key, value)
 
 Sessions are written once on session end — never edited. Captures get two single-flag updates (cleared, sent_to_reminders) but no other mutations.
 
-`project_id` is nullable. A session belongs to a category and optionally a project. The project selection screen always offers a "no project" option. Sessions without a project display as "Category / —" in the TUI. The Phase 4 migration recreates the sessions table with `project_id TEXT REFERENCES projects(id)` (dropping NOT NULL); existing rows are copied as-is. The Go layer maps NULL ↔ empty string at the scan boundary, consistent with how `end_notes` is handled.
+**Projects** are the top-level grouping. **Categories** are per-project sub-labels (e.g. "Coding", "Planning") scoped to a specific project. A category's `project_id` is nullable; NULL means it was created on a no-project session and is not surfaced in any list — it's stored for analytics but the user never picks from a no-project category list.
+
+`project_id` on sessions is nullable. The project selection screen always offers a "no project" option. Sessions without a project display as "— / Category" in the TUI. The Go layer maps NULL ↔ empty string at the scan boundary, consistent with how `end_notes` is handled.
+
+`category_id` on sessions is always required (NOT NULL). The category screen is never skipped. When a project is selected, the category screen shows that project's categories; when no project is selected, the category screen shows a free-text input with dedup against existing no-project categories by name.
 
 See `internal/store/schema.sql` for the full DDL with indexes.
 
@@ -91,13 +95,13 @@ See `internal/store/schema.sql` for the full DDL with indexes.
 A session moves through a state machine. The domain logic lives in `internal/session/` as a pure package with no I/O — the Phase 2 stdin driver and the Phase 3 Bubble Tea TUI both sit on top of it. Methods take `now time.Time` explicitly so the package is testable with a fake clock.
 
 States:
-Idle → SetupCategory → SetupProject → SetupDuration → Active
+Idle → SetupProject → SetupCategory → SetupDuration → Active
 Active ↔ Paused
 Active → EndingNotes        (on `end` or target reached)
 Paused → EndingNotes        (on `end`)
 EndingNotes → WhatNext      (session row INSERTed here)
 WhatNext → Active           (Continue: new session, same settings)
-WhatNext → SetupCategory    (New Session)
+WhatNext → SetupProject     (New Session)
 WhatNext → Break → WhatNext (5-min break)
 WhatNext → Idle             (End)
 
@@ -130,7 +134,7 @@ The target end time also shifts forward by pause duration on resume, so the sess
 **Capture disposition (Phase 4):** each capture on the What-Next screen gets three actions:
 - `Clear` — mark done; stays in DB for history.
 - `Send to Reminders` — write to `jacktasks-inbox` via EventKit; stays in DB, `sent_to_reminders` flagged.
-- `Do` — start a new session for this capture. Marks it cleared and routes into normal session setup (category → optional project → duration). The capture text is shown as context but does not pre-fill any field; user picks category, then picks an existing project, creates a new one, or skips project entirely ("no project").
+- `Do` — start a new session for this capture. Marks it cleared and routes into normal session setup (project → category → duration). The capture text is shown as context and pre-fills the category name input; user picks or creates a project first (or skips to "no project"), then picks or creates a category.
 
 ## Directory structure
 
@@ -187,7 +191,15 @@ sqlite3 ~/Library/Application\ Support/jacktasks/jacktasks.db ".tables"
 
 **Phase 3 — Bubble Tea TUI (closed):** The stdin driver in `cmd/jacktasks/main.go` has been replaced with a Bubble Tea TUI (`cmd/jacktasks/model.go`). `internal/session/` was unchanged. Full screen-by-screen port: resume offer, category/project selection with inline create, duration, active command loop, end notes, what-next, break countdown. Auto-ends session when timer expires; auto-ends break after 5 minutes. Session data snapshotted before async store write to avoid machine-state races. Dependencies added: `charmbracelet/bubbletea`, `charmbracelet/lipgloss`, `charmbracelet/bubbles`.
 
-**Phases 4–6 (planned):** see `LOG.md` for the running phase plan. Briefly: Reminders integration, crash recovery, sync service + client.
+**Phase 4 — Reminders integration (closed):** `internal/reminders/` package: `Client` interface, `eventkitClient` wrapping `go-eventkit`, `Fake` for tests. Capture disposition on WhatNext: `c<n>` clear, `r<n>` send to Reminders, `d<n>` do/start session. Startup screen replaces the old resume y/N prompt: shows inbox items (async fetch), resume option, new session, quit. EventKit failure is non-fatal.
+
+**Pre-Phase-5 design fix (closed):** Inverted the project ↔ category relationship. Projects are now top-level; categories are per-project sub-labels. Schema rewritten (no migration — local DB dropped and recreated). Session setup flow reordered to Project → Category → Duration throughout the state machine and TUI. No-project path uses free-text category entry with name-based dedup (`CreateOrGetCategoryByName`). 48 tests passing.
+
+**Phase 5 — Crash recovery (closed):** `active.json` sentinel in the data dir, written on every Active/Paused transition and after `upn`/`ext`/`pause`/`resume`/`ContinueSession`. On startup, if the sentinel exists and its session UUID isn't in the DB, a recovery prompt is shown before the normal start screen. New `internal/recovery/` package; `Snapshot()` / `Hydrate()` methods on `session.Machine`. Sentinel cleared on successful DB write. 6 new recovery tests + 6 new session tests.
+
+**Phase 5.5 — TUI polish (closed):** `cmd/jacktasks/styles.go` — Lipgloss palette with `AdaptiveColor`, named styles, key maps. Persistent header (app name / screen name / session context) and footer (context-sensitive key hints) on every screen. Arrow-key cursor navigation on all list screens with Enter-to-select; numeric shortcuts still work. `bubbles/progress` bar on Active, Paused, and Break screens. `bubbles/spinner` for inbox load and session save. No state-machine or flow changes. One new indirect dep: `charmbracelet/harmonica` (required by `bubbles/progress`).
+
+**Phase 6 — Sync (planned, mid-week):** split into 6a protocol + server skeleton (`cmd/jacktasks-sync/`, REST endpoints, conflict rules), 6b client `jacktasks sync` subcommand, 6c deploy to ThinkCentre and verify cross-Mac convergence. One new schema migration required: `captures.updated_at` for LWW on capture flags. See `LOG.md` for the full plan.
 
 ## What's deliberately out of V1
 

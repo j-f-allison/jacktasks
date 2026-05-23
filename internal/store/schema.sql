@@ -1,26 +1,26 @@
-CREATE TABLE IF NOT EXISTS categories (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL,
-  deleted_at  INTEGER,
-  archived    INTEGER NOT NULL DEFAULT 0
-);
-
 CREATE TABLE IF NOT EXISTS projects (
   id           TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
-  category_id  TEXT NOT NULL REFERENCES categories(id),
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
   deleted_at   INTEGER,
   archived     INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS categories (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  project_id  TEXT REFERENCES projects(id),
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  deleted_at  INTEGER,
+  archived    INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   id                   TEXT PRIMARY KEY,
+  project_id           TEXT REFERENCES projects(id),
   category_id          TEXT NOT NULL REFERENCES categories(id),
-  project_id           TEXT NOT NULL REFERENCES projects(id),
   planned_duration_min INTEGER NOT NULL,
   actual_duration_sec  INTEGER NOT NULL,
   started_at           INTEGER NOT NULL,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS config (
   value  TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_projects_category ON projects(category_id);
+CREATE INDEX IF NOT EXISTS idx_categories_project ON categories(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_captures_session ON captures(session_id);
 CREATE INDEX IF NOT EXISTS idx_categories_updated ON categories(updated_at);

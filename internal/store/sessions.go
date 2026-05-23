@@ -75,15 +75,24 @@ func (s *Store) CreateSession(ctx context.Context, in CreateSessionInput) (*Sess
 		CreatedAt:          time.Now(),
 		DeviceID:           in.DeviceID,
 	}
+	var projectID sql.NullString
+	if in.ProjectID != "" {
+		projectID = sql.NullString{String: in.ProjectID, Valid: true}
+	}
+	var endNotesPut sql.NullString
+	if in.EndNotes != "" {
+		endNotesPut = sql.NullString{String: in.EndNotes, Valid: true}
+	}
+
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO sessions
 		 (id, category_id, project_id, planned_duration_min, actual_duration_sec,
 		  started_at, ended_at, end_notes, status, created_at, device_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sess.ID, sess.CategoryID, sess.ProjectID,
+		sess.ID, sess.CategoryID, projectID,
 		sess.PlannedDurationMin, sess.ActualDurationSec,
 		sess.StartedAt.Unix(), sess.EndedAt.Unix(),
-		sess.EndNotes, string(sess.Status),
+		endNotesPut, string(sess.Status),
 		sess.CreatedAt.Unix(), sess.DeviceID,
 	)
 	if err != nil {
@@ -163,11 +172,11 @@ func (s *Store) LatestSession(ctx context.Context) (*Session, error) {
 func scanSession(r rowScanner) (Session, error) {
 	var sess Session
 	var startedAt, endedAt, createdAt int64
-	var endNotes sql.NullString
+	var projectID, endNotes sql.NullString
 	var status string
 
 	if err := r.Scan(
-		&sess.ID, &sess.CategoryID, &sess.ProjectID,
+		&sess.ID, &sess.CategoryID, &projectID,
 		&sess.PlannedDurationMin, &sess.ActualDurationSec,
 		&startedAt, &endedAt,
 		&endNotes, &status,
@@ -178,6 +187,9 @@ func scanSession(r rowScanner) (Session, error) {
 	sess.StartedAt = time.Unix(startedAt, 0)
 	sess.EndedAt = time.Unix(endedAt, 0)
 	sess.CreatedAt = time.Unix(createdAt, 0)
+	if projectID.Valid {
+		sess.ProjectID = projectID.String
+	}
 	if endNotes.Valid {
 		sess.EndNotes = endNotes.String
 	}
