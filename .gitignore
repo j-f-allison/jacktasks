@@ -1,0 +1,39 @@
+# Built binaries
+/jacktasks
+/jacktasks-sync
+bin/
+dist/
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# Go workspaces (keep local)
+vendor/
+go.work
+go.work.sum
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / editor
+.vscode/
+.idea/
+.cursor/
+.zed/
+*.swp
+*.swo
+
+# Local environment
+.env
+.env.local
+
+# Stray databases (the real DB lives in ~/Library, not the repo)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
