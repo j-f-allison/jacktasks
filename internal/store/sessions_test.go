@@ -178,3 +178,43 @@ func TestGetSession(t *testing.T) {
 		t.Errorf("got err %v, want ErrNotFound", err)
 	}
 }
+
+func TestLatestSession(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.LatestSession(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty store: got err %v, want ErrNotFound", err)
+	}
+
+	catID, projID := sessionFixtures(t, s)
+	now := time.Now()
+
+	for i := 0; i < 3; i++ {
+		_, err := s.CreateSession(ctx, CreateSessionInput{
+			CategoryID:         catID,
+			ProjectID:          projID,
+			PlannedDurationMin: 25,
+			ActualDurationSec:  1500,
+			StartedAt:          now.Add(time.Duration(i) * time.Minute),
+			EndedAt:            now.Add(time.Duration(i)*time.Minute + 25*time.Minute),
+			Status:             SessionEndedEarly,
+			DeviceID:           "macbook-test",
+		})
+		if err != nil {
+			t.Fatalf("create session %d: %v", i, err)
+		}
+	}
+
+	latest, err := s.LatestSession(ctx)
+	if err != nil {
+		t.Fatalf("latest: %v", err)
+	}
+	if latest.Status != SessionEndedEarly {
+		t.Errorf("Status = %q, want %q", latest.Status, SessionEndedEarly)
+	}
+	// latest should be the one with StartedAt = now + 2 minutes
+	if !latest.StartedAt.Equal(now.Add(2 * time.Minute).Truncate(time.Second)) {
+		t.Errorf("StartedAt = %v, want %v", latest.StartedAt, now.Add(2*time.Minute).Truncate(time.Second))
+	}
+}

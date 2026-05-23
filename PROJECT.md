@@ -132,9 +132,12 @@ jacktasks/
 ├── go.mod
 ├── go.sum
 ├── cmd/
-│   └── jacktasks/main.go      # CLI entrypoint
+│   └── jacktasks/main.go      # CLI entrypoint (stdin driver)
 ├── internal/
 │   ├── paths/                 # filesystem paths (DataDir, DBPath)
+│   ├── session/               # pure session state machine (no I/O)
+│   │   ├── session.go
+│   │   └── session_test.go
 │   └── store/                 # SQLite layer
 │       ├── schema.sql
 │       ├── store.go           # Open, Close, pragmas, migrations
@@ -171,7 +174,7 @@ sqlite3 ~/Library/Application\ Support/jacktasks/jacktasks.db ".tables"
 
 **Phase 1 — Data layer (closed):** SQLite schema + idempotent migrations, DAL for all six tables with tests, paths package, device_id lazy-init, `cmd/jacktasks/main.go` wiring. 24 tests passing.
 
-**Phase 2 — Core session loop (next):** the session state machine is built as a pure package (`internal/session/`) with no I/O, validated with a thin stdin driver. The same package will back the Bubble Tea TUI in Phase 3 unchanged. See "Session model" above for states, commands (`upn`, `ext`, `pause`, `resume`, `end`), duration accounting, and resume-on-restart. Sessions written to store on completion only.
+**Phase 2 — Core session loop (closed):** `internal/session/` is a pure state-machine package with no I/O. `cmd/jacktasks/main.go` is a thin stdin driver on top of it. All states, commands (`upn`, `ext`, `pause`, `resume`, `end`), duration accounting, and resume-on-restart are implemented and tested. Sessions and captures written to store on session end only. The same package will back the Bubble Tea TUI in Phase 3 unchanged.
 
 **Phases 3–6 (planned):** see `LOG.md` for the running phase plan. Briefly: Bubble Tea TUI, Reminders integration, crash recovery, sync service + client.
 

@@ -14,13 +14,13 @@ import (
 type SessionStatus string
 
 const (
-	SessionCompleted SessionStatus = "completed"
-	SessionAbandoned SessionStatus = "abandoned"
+	SessionCompleted  SessionStatus = "completed"
+	SessionEndedEarly SessionStatus = "ended_early"
 )
 
 // Valid reports whether s is one of the recognized statuses.
 func (s SessionStatus) Valid() bool {
-	return s == SessionCompleted || s == SessionAbandoned
+	return s == SessionCompleted || s == SessionEndedEarly
 }
 
 // Session is an immutable historical record of one work block. Written
@@ -136,6 +136,26 @@ func (s *Store) GetSession(ctx context.Context, id string) (*Session, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	return &sess, nil
+}
+
+// LatestSession returns the most recently started session, or ErrNotFound
+// if none exist. Used for resume-on-restart detection.
+func (s *Store) LatestSession(ctx context.Context) (*Session, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, category_id, project_id, planned_duration_min, actual_duration_sec,
+		        started_at, ended_at, end_notes, status, created_at, device_id
+		 FROM sessions
+		 ORDER BY started_at DESC
+		 LIMIT 1`,
+	)
+	sess, err := scanSession(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest session: %w", err)
 	}
 	return &sess, nil
 }

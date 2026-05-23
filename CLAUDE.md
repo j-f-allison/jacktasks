@@ -35,6 +35,10 @@ These patterns are consistent across the existing code. New code should match.
 - **Test isolation.** Every test gets a fresh `newTestStore(t)` using `t.TempDir()`. No shared state between tests.
 - **No CHECK constraints in SQL when Go-layer validation exists.** Validation lives in the Go method (e.g. `SessionStatus.Valid()`). If we ever bypass the Go layer (raw SQL writes from another tool), we accept that no CHECK fires. This was an explicit trade-off; revisit if it bites.
 
+## At phase boundaries and good checkpoints
+
+At natural stopping points (phase complete, significant decision made, meaningful chunk of work done), ask the user: "Should I update PROJECT.md and LOG.md?" Do not auto-update on minor changes. The user decides what counts as worth recording.
+
 ## What not to do
 
 - **Don't change schema.sql without bumping a migration story.** Schema is currently idempotent via `IF NOT EXISTS`, but adding a column to an existing table requires a migration plan. Bring it up before doing it.

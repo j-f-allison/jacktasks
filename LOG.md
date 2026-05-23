@@ -91,16 +91,37 @@ Goal: open SQLite, apply schema, full CRUD for all tables with tests. No UI.
 
 ---
 
+---
+
+## 2026-05-23 — Phase 2: Core session loop
+
+Goal: pure session state machine + thin stdin driver. No Bubble Tea yet.
+
+**Done:**
+- Renamed `SessionAbandoned` → `SessionEndedEarly` (`"ended_early"`) in the store. "Abandoned" implied discarded data; "ended early" is a normal intentional stop and supports resume-on-restart. This was a correctness fix — the resume feature checks for this status by value.
+- Added `LatestSession` to the store (fetches most-recent session by `started_at`).
+- `internal/session/` package: pure state machine, no I/O. `Machine` struct tracks all in-memory session state. `BeginSetup` → `SetCategory` → `SetProject` → `SetDuration` → `Active` ↔ `Paused` → `EndingNotes` → `WhatNext` → (Continue / New / Break / End / Idle). All methods take explicit `now time.Time`.
+- Duration accounting: `actual = (ended_at − started_at) − sum(pause intervals)`. Target end shifts forward on resume so the session still aims for the same working time.
+- `ToStoreSessionInput` converts completed in-memory session to `store.CreateSessionInput`. Only valid after `End` has been called.
+- `cmd/jacktasks/main.go` replaced with a stdin driver: resume-on-restart offer, category/project selection with inline creation, active command loop (`upn`, `ext`, `pause`, `resume`, `end`), end notes, store write on session end, what-next screen.
+- Bug caught during smoke test: `Machine{}` zero value starts in `StateIdle`, and the run loop returned immediately. Fixed by adding `BeginSetup()` as an explicit Idle→SetupCategory transition, keeping Idle as a clean terminal state.
+
+**Result:** 39 passing tests across all packages. Full session flow exercised manually.
+
+**Trade-offs explicitly accepted:**
+- Resume creates a new session row; the `ended_early` row is left as-is. Simple and append-only, consistent with the sync model.
+- stdin driver is intentionally throwaway. It exercises the session package but will be replaced wholesale by Bubble Tea in Phase 3. No effort spent polishing the prompts.
+
 ## Phase plan (remaining)
 
 | Phase | Goal | Status |
 |---|---|---|
 | 0 | Spike: prove go-eventkit + Tailscale | ✅ closed |
 | 1 | Data layer with tests | ✅ closed |
-| 2 | Core session loop with stdin prompts | ⬜ next |
-| 3 | Bubble Tea TUI replacing prompts | ⬜ |
+| 2 | Core session loop with stdin prompts | ✅ closed |
+| 3 | Bubble Tea TUI replacing prompts | ⬜ next |
 | 4 | Reminders integration | ⬜ |
 | 5 | Crash recovery / state persistence | ⬜ |
 | 6 | Sync service + client | ⬜ |
 
-Time estimate: ~10–14 more sessions across Phases 2–6, with Phase 3 dominating.
+Time estimate: ~8–12 more sessions across Phases 3–6, with Phase 3 dominating.
