@@ -84,6 +84,47 @@ Sessions are written once on session end — never edited. Captures get two sing
 
 See `internal/store/schema.sql` for the full DDL with indexes.
 
+## Session model
+
+A session moves through a state machine. The domain logic lives in `internal/session/` as a pure package with no I/O — the Phase 2 stdin driver and the Phase 3 Bubble Tea TUI both sit on top of it. Methods take `now time.Time` explicitly so the package is testable with a fake clock.
+
+States:
+Idle → SetupCategory → SetupProject → SetupDuration → Active
+Active ↔ Paused
+Active → EndingNotes        (on `end` or target reached)
+Paused → EndingNotes        (on `end`)
+EndingNotes → WhatNext      (session row INSERTed here)
+WhatNext → Active           (Continue: new session, same settings)
+WhatNext → SetupCategory    (New Session)
+WhatNext → Break → WhatNext (5-min break)
+WhatNext → Idle             (End)
+
+In-memory session value holds: `id`, `category_id`, `project_id`, `planned_duration_min`, `started_at`, `pauses[]`, current target end time, `captures[]`. Written to the DB only on session end, in one INSERT. Everything mutable during the active phase lives in memory.
+
+**Commands during Active / Paused:**
+
+| Command | Behavior |
+|---|---|
+| `upn <text>` | Record a capture, deferred to session end. Allowed in both Active and Paused; does not change state. |
+| `ext <n>` | Extend the target end time by `n` minutes. Does not write to `actual_duration_sec`. Allowed in both Active and Paused. |
+| `pause` | Pause the timer. If already paused, echoes a reminder to use `resume`. |
+| `resume` | Resume from Paused. |
+| `end` | End the session early; transitions to EndingNotes. |
+
+**Duration accounting:**
+actual_duration_sec = (ended_at - started_at) - sum(pause intervals)
+
+The target end time also shifts forward by pause duration on resume, so the session aims for the same amount of *working* time across pauses.
+
+**Session status values:**
+
+- `completed` — reached or exceeded planned duration
+- `ended_early` — ended via `end` before planned duration
+
+**Resume on restart:** if the most recent session is `ended_early`, the start screen offers `Resume <category>/<project> with N minutes remaining` as an option. Selecting it creates a new session with the same category/project and `planned_duration_min = remaining` (previous planned minus previous actual). The previous `ended_early` row stays as-is — resume creates a fresh row, never edits.
+
+**What-Next screen:** shows the captures from the just-ended session at the top, then action choices: `Continue Session` (new session, same settings), `New Session` (back to SetupCategory), `Break` (5-minute break, returns here), `End`. Capture disposition (clear / send to Reminders) is deferred to Phase 4.
+
 ## Directory structure
 
 ```
@@ -130,7 +171,7 @@ sqlite3 ~/Library/Application\ Support/jacktasks/jacktasks.db ".tables"
 
 **Phase 1 — Data layer (closed):** SQLite schema + idempotent migrations, DAL for all six tables with tests, paths package, device_id lazy-init, `cmd/jacktasks/main.go` wiring. 24 tests passing.
 
-**Phase 2 — Core session loop (next):** validate the session flow with simple stdin prompts before investing in Bubble Tea. Category/project pickers with "add new", duration select with presets, active session with `upn` and `ext` commands, end-of-session notes + what-next list. Sessions written to store on completion only.
+**Phase 2 — Core session loop (next):** the session state machine is built as a pure package (`internal/session/`) with no I/O, validated with a thin stdin driver. The same package will back the Bubble Tea TUI in Phase 3 unchanged. See "Session model" above for states, commands (`upn`, `ext`, `pause`, `resume`, `end`), duration accounting, and resume-on-restart. Sessions written to store on completion only.
 
 **Phases 3–6 (planned):** see `LOG.md` for the running phase plan. Briefly: Bubble Tea TUI, Reminders integration, crash recovery, sync service + client.
 
