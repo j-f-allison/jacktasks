@@ -55,7 +55,7 @@ sudo nano /etc/jacktasks-sync/env
 
 - `JACKTASKS_SYNC_TOKEN` — generate with `openssl rand -hex 32`
 - `JACKTASKS_SYNC_DB` — leave as `/var/lib/jacktasks-sync/master.db`
-- `JACKTASKS_SYNC_ADDR` — `$(tailscale ip -4):8484`
+- `JACKTASKS_SYNC_ADDR` — `<tailscale-ip>:8484` (run `tailscale ip -4` separately to get the IP; **do not** put `$(...)` in the env file — systemd does not expand shell substitutions in `EnvironmentFile`)
 
 ## 4. Install and start the systemd unit
 

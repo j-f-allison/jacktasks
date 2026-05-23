@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/j-f-allison/jacktasks/internal/reminders"
 	"github.com/j-f-allison/jacktasks/internal/session"
 	"github.com/j-f-allison/jacktasks/internal/store"
+	"github.com/j-f-allison/jacktasks/internal/syncclient"
 )
 
 // ── messages ──────────────────────────────────────────────────────────────────
@@ -49,6 +51,11 @@ type captureActedMsg struct {
 }
 
 type fatalMsg struct{ err error }
+
+type syncDoneMsg struct {
+	summary string
+	err     error
+}
 
 // ── UI sub-states ─────────────────────────────────────────────────────────────
 
@@ -133,9 +140,15 @@ type Model struct {
 	helpModel    help.Model      // for footer key hints
 	showFullHelp bool            // toggled by '?'
 	savingSession bool           // true while session DB write is in flight
+
+	// sync (Phase 6c): config plumbed from env at launch; non-empty URL+Token
+	// enables the "s) Sync now" menu option on the startup screen.
+	syncCfg     syncclient.Config
+	syncing     bool   // true while a manual sync is in flight
+	syncSummary string // last sync result, shown on the start screen
 }
 
-func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, remClient reminders.Client) Model {
+func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, remClient reminders.Client, syncCfg syncclient.Config) Model {
 	ti := textinput.New()
 	ti.Focus()
 
@@ -158,6 +171,7 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 		sp:        sp,
 		prog:      prog,
 		helpModel: help.New(),
+		syncCfg:   syncCfg,
 	}
 
 	// Check for a crash sentinel before anything else. Both reads are local and fast.
@@ -339,6 +353,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case syncDoneMsg:
+		m.syncing = false
+		m.cursor = 0
+		m.input.Reset()
+		m.input.Placeholder = "choice"
+		if msg.err != nil {
+			m.errMsg = "sync error: " + msg.err.Error()
+			m.syncSummary = msg.summary
+		} else {
+			m.syncSummary = msg.summary
+		}
+		return m, nil
+
 	case captureActedMsg:
 		if msg.err != nil {
 			// Undo optimistic disposition so user can retry.
@@ -437,7 +464,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // isLoading reports whether an async operation warrants the spinner.
 func (m Model) isLoading() bool {
-	return (m.remClient != nil && !m.inboxLoaded && m.extra == uiExtraStart) || m.savingSession
+	return (m.remClient != nil && !m.inboxLoaded && m.extra == uiExtraStart) || m.savingSession || m.syncing
+}
+
+// syncConfigured reports whether the env-supplied sync config is usable.
+func (m Model) syncConfigured() bool {
+	return m.syncCfg.URL != "" && m.syncCfg.Token != ""
 }
 
 // timerPct returns the progress fraction (0.0–1.0) for the active timer or break.
@@ -485,7 +517,11 @@ func (m Model) listLen() int {
 		if m.resume != nil {
 			n++
 		}
-		return n + 2 // n) new + q) quit
+		n += 2 // n) new + q) quit
+		if m.syncConfigured() {
+			n++ // s) Sync now
+		}
+		return n
 	case state == session.StateSetupProject && m.extra == uiExtraNone:
 		return len(m.projects) + 2 // 0) no-project + projects + n) new
 	case state == session.StateSetupCategory && m.extra == uiExtraNone && m.machine.ProjectID() != "":
@@ -515,6 +551,13 @@ func (m Model) cursorVal() string {
 		}
 		if offset == 0 {
 			return "n"
+		}
+		offset--
+		if m.syncConfigured() {
+			if offset == 0 {
+				return "s"
+			}
+			offset--
 		}
 		return "q"
 
@@ -587,6 +630,21 @@ func (m Model) handleStartScreen(val string) (tea.Model, tea.Cmd) {
 		m.input.Reset()
 		m.input.Placeholder = "choice"
 		return m, m.loadProjectsCmd()
+
+	case "s":
+		if !m.syncConfigured() {
+			m.errMsg = "sync not configured"
+			m.input.Reset()
+			return m, nil
+		}
+		if m.syncing {
+			m.input.Reset()
+			return m, nil
+		}
+		m.syncing = true
+		m.syncSummary = ""
+		m.input.Reset()
+		return m, tea.Batch(m.runSyncCmd(), m.sp.Tick)
 
 	case "q":
 		return m, tea.Quit
@@ -987,6 +1045,15 @@ func (m Model) loadProjectsCmd() tea.Cmd {
 	}
 }
 
+func (m Model) runSyncCmd() tea.Cmd {
+	ctx, s, cfg := m.ctx, m.store, m.syncCfg
+	return func() tea.Msg {
+		var buf bytes.Buffer
+		err := syncclient.Sync(ctx, s, cfg, &buf)
+		return syncDoneMsg{summary: strings.TrimSpace(buf.String()), err: err}
+	}
+}
+
 func (m Model) loadInboxCmd() tea.Cmd {
 	rc := m.remClient
 	ctx := m.ctx
@@ -1370,8 +1437,21 @@ func (m Model) renderContent(b *strings.Builder) {
 
 // renderStartScreen renders the startup screen (inbox + resume + new/quit).
 func (m Model) renderStartScreen(b *strings.Builder) {
+	if logo := renderLogo(m.width); logo != "" {
+		b.WriteString(logo)
+		b.WriteByte('\n')
+	}
+
 	if m.remClient != nil && !m.inboxLoaded {
 		fmt.Fprintf(b, "  %s Checking inbox...\n\n", m.sp.View())
+		b.WriteString("  ")
+		b.WriteString(m.input.View())
+		writeErr(b, m.errMsg)
+		return
+	}
+
+	if m.syncing {
+		fmt.Fprintf(b, "  %s Syncing...\n\n", m.sp.View())
 		b.WriteString("  ")
 		b.WriteString(m.input.View())
 		writeErr(b, m.errMsg)
@@ -1399,7 +1479,18 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 	}
 	fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == cursorIdx, "n) New session"))
 	cursorIdx++
+	if m.syncConfigured() {
+		fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == cursorIdx, "s) Sync now"))
+		cursorIdx++
+	}
 	fmt.Fprintf(b, "  %s\n\n", renderListItem(m.cursor == cursorIdx, "q) Quit"))
+
+	if m.syncSummary != "" {
+		for _, line := range strings.Split(m.syncSummary, "\n") {
+			fmt.Fprintf(b, "  %s\n", StyleDim.Render(line))
+		}
+		fmt.Fprintln(b)
+	}
 
 	b.WriteString("  ")
 	b.WriteString(m.input.View())

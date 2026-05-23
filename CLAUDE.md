@@ -2,6 +2,16 @@
 
 Instructions for Claude (chat or Code) when working on this project. Read `PROJECT.md` first for context and `LOG.md` for the running history of decisions.
 
+## Current handoff state (2026-05-23)
+
+V1 code is complete. All 68 tests pass. The sync server is deployed on the ThinkCentre at `100.70.19.55:8484` and the MacBook is syncing successfully.
+
+**Next pickup:**
+- Mac Mini bootstrap — see the "Pending" block at the bottom of LOG.md and `deploy/DEPLOY.md` steps 7–8.
+- After Mac Mini is in, run a few days of real use before considering anything from the "out of V1" list.
+
+**Do not** start new features until the Mac Mini side is verified and the user has had a trial period with the deployed system.
+
 ## Communication style
 
 These are the user's general preferences. They apply unless overridden in the moment.

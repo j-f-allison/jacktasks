@@ -15,9 +15,12 @@ vet:
 ## check — build + vet + test (run before committing)
 check: build vet test
 
-## install — install the TUI client to /usr/local/bin (macOS)
+## install — install the TUI client (macOS). Defaults to /usr/local/bin (needs sudo).
+## Override with: make install PREFIX=$HOME/.local/bin   (no sudo needed)
+PREFIX ?= /usr/local/bin
 install:
-	go build -o /usr/local/bin/jacktasks ./cmd/jacktasks
+	go build -o $(PREFIX)/jacktasks ./cmd/jacktasks
+	@echo "Installed: $(PREFIX)/jacktasks"
 
 ## build-sync-linux — cross-compile the sync server for linux/amd64 (ThinkCentre)
 ## Output: jacktasks-sync-linux in the repo root

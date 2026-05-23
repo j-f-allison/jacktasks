@@ -598,3 +598,44 @@ Goal: produce everything needed to deploy the sync server on the ThinkCentre and
 - Generate the token once (`openssl rand -hex 32`), add it to `/etc/jacktasks-sync/env` on the ThinkCentre and to `~/.zshrc` on both Macs before running the first sync.
 - The ThinkCentre's Tailscale IP goes in `JACKTASKS_SYNC_ADDR` (server) and `JACKTASKS_SYNC_URL` (clients). Run `tailscale ip -4` on the ThinkCentre to get it.
 - On the Mac Mini's first run, launch `jacktasks` once (not `jacktasks sync`) to bootstrap the local DB and accept the Reminders TCC permission prompt. Then `jacktasks sync` to pull MacBook's data.
+
+---
+
+## 2026-05-23 — Phase 6c: Actual deploy (MacBook side complete)
+
+Goal: stand up `jacktasks-sync` on the ThinkCentre and verify the MacBook can push/pull.
+
+**Done:**
+
+- ThinkCentre Tailscale IP: `100.70.19.55`. Service user `jacktasks` created. Binary at `/usr/local/bin/jacktasks-sync`. Data dir `/var/lib/jacktasks-sync/`. Env file `/etc/jacktasks-sync/env` (0640, root:jacktasks). systemd unit installed and `enable --now`'d. `curl http://100.70.19.55:8484/healthz` returns `{"ok":true}`.
+- MacBook: `sudo make install` to `/usr/local/bin/jacktasks`. `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN` exported in `~/.zshrc`. `jacktasks sync` confirmed working — pushed local data to the server.
+
+**Issues hit during deploy (all documented and fixed in DEPLOY.md):**
+
+1. **DEPLOY.md had `/path/to/env.template` placeholders.** The repo isn't on the ThinkCentre, so step 3/4 had nowhere to copy from. Fixed: step 2 now scp's the binary + env template + service file together to `/tmp/`; step 3/4 `mv` them into final locations.
+2. **`$(tailscale ip -4):8484` in the env file.** systemd's `EnvironmentFile` does **not** expand shell command substitutions. Server logs showed `serve: listen tcp: lookup $(tailscale ip -4): no such host`. Fixed: env file now requires a literal IP; DEPLOY.md updated with explicit warning.
+3. **`make install` failed with permission denied on macOS.** `/usr/local/bin/` needs sudo on macOS (unlike many Linux distros). Fixed: Makefile now honors `PREFIX` (default `/usr/local/bin`); user can `sudo make install` or `make install PREFIX=$HOME/.local/bin`.
+
+**Pending (next session, away from Mac Mini):**
+
+- Run `jacktasks` (TUI) on Mac Mini once to bootstrap the local DB and accept the Reminders TCC permission prompt.
+- Export the same `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN` in Mac Mini's `~/.zshrc`.
+- `jacktasks sync` on Mac Mini → expect "pushed 0, pulled N" for every table (initial sync down from server).
+- Run a session on Mac Mini, sync. Then sync on MacBook. Verify both `device_id`s appear in `sessions` table on both machines.
+
+---
+
+## 2026-05-23 — Pre-trial UI polish
+
+Two small additions before starting the trial period. No new features, no scope expansion.
+
+**Done:**
+
+- **ASCII logo on startup screen.** `cmd/jacktasks/logo.go` — block-letter "JackTasks" banner in `StyleTitle` purple, rendered above the inbox/resume/new menu. Self-hides when terminal width < `logoWidth + 2` (72 chars) so narrow terminals fall back to the existing layout.
+- **`s) Sync now` on the startup menu.** Reads `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN` from env at TUI launch (`main.go`), plumbs a `syncclient.Config` through to `newModel`. When both env vars are non-empty, the menu shows `s) Sync now` between `n) New session` and `q) Quit`; selecting it runs `syncclient.Sync` in a `tea.Cmd`, shows the existing spinner with "Syncing...", then prints the per-table summary (or error) in `StyleDim` under the menu. If env vars aren't set, the option is hidden — no change in behavior. New `syncDoneMsg`, new `runSyncCmd`, `isLoading` extended to include `m.syncing`, and `listLen` / `cursorVal` updated so arrow-key navigation accounts for the optional row.
+
+**Trade-off accepted:** sync still depends on env vars being exported in the launching shell. If the trial surfaces that as annoying, the post-trial fix is a config file or a `.env` next to the DB — not a blocker for V1.
+
+**Build/test:** clean. 68 tests pass.
+
+**Operational note:** client-only change, so only `sudo make install` on each Mac is needed. ThinkCentre server is untouched.

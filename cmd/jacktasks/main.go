@@ -80,7 +80,12 @@ func runTUI(ctx context.Context) {
 		remClient = rc
 	}
 
-	m := newModel(s, deviceID, dataDir, ctx, remClient)
+	syncCfg := syncclient.Config{
+		URL:   os.Getenv("JACKTASKS_SYNC_URL"),
+		Token: os.Getenv("JACKTASKS_SYNC_TOKEN"),
+	}
+
+	m := newModel(s, deviceID, dataDir, ctx, remClient, syncCfg)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
