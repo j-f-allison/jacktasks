@@ -273,7 +273,8 @@ func (m *Machine) End(now time.Time) error {
 
 	actualSec := m.actualDurationSec()
 	plannedSec := m.plannedMin * 60
-	if actualSec >= plannedSec {
+	if plannedSec-actualSec <= 5*60 {
+		// 5 min or less remaining counts as completed — not worth a resume prompt.
 		m.status = store.SessionCompleted
 	} else {
 		m.status = store.SessionEndedEarly

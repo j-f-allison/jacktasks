@@ -215,7 +215,7 @@ func checkResume(ctx context.Context, s *store.Store) *resumeInfo {
 		return nil
 	}
 	remaining := latest.PlannedDurationMin - (latest.ActualDurationSec / 60)
-	if remaining <= 0 {
+	if remaining <= 5 {
 		return nil
 	}
 	cat, err := s.GetCategory(ctx, latest.CategoryID)
@@ -342,14 +342,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		if msg.err == nil {
 			m.inboxItems = msg.items
-		}
-		// If inbox loaded with no items and no resume, skip the start screen.
-		if m.extra == uiExtraStart && len(m.inboxItems) == 0 && m.resume == nil {
-			m.extra = uiExtraNone
-			_ = m.machine.BeginSetup()
-			m.input.Reset()
-			m.input.Placeholder = "choice"
-			return m, m.loadProjectsCmd()
 		}
 		return m, nil
 

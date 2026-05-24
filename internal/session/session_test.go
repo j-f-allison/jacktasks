@@ -246,12 +246,32 @@ func TestEndCompletedStatus(t *testing.T) {
 func TestEndEndedEarlyStatus(t *testing.T) {
 	m, now := setupToActive(t, 25)
 
-	// end after 10 minutes — short of planned 25
+	// end after 10 minutes — 15 remaining, well above the 5-min threshold
 	if err := m.End(now.Add(10 * time.Minute)); err != nil {
 		t.Fatalf("End: %v", err)
 	}
 	if m.Status() != store.SessionEndedEarly {
 		t.Errorf("Status = %q, want ended_early", m.Status())
+	}
+}
+
+func TestEndNearCompleteIsCompleted(t *testing.T) {
+	// Ending with exactly 5 min remaining should be completed, not ended_early.
+	m, now := setupToActive(t, 25)
+	if err := m.End(now.Add(20 * time.Minute)); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if m.Status() != store.SessionCompleted {
+		t.Errorf("5 min remaining: Status = %q, want completed", m.Status())
+	}
+
+	// 6 min remaining — just over the threshold — is still ended_early.
+	m2, now2 := setupToActive(t, 25)
+	if err := m2.End(now2.Add(19 * time.Minute)); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if m2.Status() != store.SessionEndedEarly {
+		t.Errorf("6 min remaining: Status = %q, want ended_early", m2.Status())
 	}
 }
 
@@ -439,8 +459,9 @@ func TestToStoreSessionInput(t *testing.T) {
 	if in.ActualDurationSec != 20*60 {
 		t.Errorf("ActualDurationSec = %d, want %d", in.ActualDurationSec, 20*60)
 	}
-	if in.Status != store.SessionEndedEarly {
-		t.Errorf("Status = %q, want ended_early", in.Status)
+	// 20 of 25 min = 5 min remaining, which is at the near-complete threshold → completed.
+	if in.Status != store.SessionCompleted {
+		t.Errorf("Status = %q, want completed", in.Status)
 	}
 	if in.EndNotes != "wrap-up note" {
 		t.Errorf("EndNotes = %q", in.EndNotes)
