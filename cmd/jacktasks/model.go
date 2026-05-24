@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -117,6 +118,9 @@ type Model struct {
 	// single input component, reconfigured per screen
 	input textinput.Model
 
+	// multi-line word-wrapped input for end-of-session notes
+	noteArea textarea.Model
+
 	// updated by tick; used for countdown rendering
 	now time.Time
 
@@ -152,6 +156,12 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 	ti := textinput.New()
 	ti.Focus()
 
+	ta := textarea.New()
+	ta.Placeholder = "optional notes..."
+	ta.ShowLineNumbers = false
+	ta.SetHeight(4)
+	ta.CharLimit = 0
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = StyleAccent
@@ -166,6 +176,7 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 		ctx:       ctx,
 		machine:   &session.Machine{},
 		input:     ti,
+		noteArea:  ta,
 		now:       time.Now(),
 		remClient: remClient,
 		sp:        sp,
@@ -262,6 +273,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.prog.Width = max(m.width-8, 20)
 		m.helpModel.Width = m.width
+		m.noteArea.SetWidth(max(m.width-4, 20))
 		return m, nil
 
 	case fatalMsg:
@@ -295,8 +307,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Auto-end session when timer expires.
 		if machState == session.StateActive && m.machine.TimeRemaining(m.now) == 0 {
 			_ = m.machine.End(m.now)
-			m.input.Reset()
-			m.input.Placeholder = "notes"
+			m.enterEndingNotes()
 			return m, tea.Batch(cmds...)
 		}
 		// Auto-end break after 5 minutes.
@@ -388,7 +399,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Arrow key cursor navigation for list screens.
+	// Arrow key and vim (j/k) cursor navigation for list screens.
 	if n := m.listLen(); n > 0 {
 		switch msg.Type {
 		case tea.KeyUp:
@@ -401,7 +412,30 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 			return m, nil
+		case tea.KeyRunes:
+			switch msg.String() {
+			case "k":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+				return m, nil
+			case "j":
+				if m.cursor < n-1 {
+					m.cursor++
+				}
+				return m, nil
+			}
 		}
+	}
+
+	// End notes uses a textarea; handle it before the textinput path.
+	if m.machine.State() == session.StateEndingNotes {
+		if msg.Type == tea.KeyEnter {
+			return m.handleEndingNotes(strings.TrimSpace(m.noteArea.Value()))
+		}
+		var taCmd tea.Cmd
+		m.noteArea, taCmd = m.noteArea.Update(msg)
+		return m, taCmd
 	}
 
 	var tiCmd tea.Cmd
@@ -885,8 +919,7 @@ func (m Model) handleActiveCommand(val string) (tea.Model, tea.Cmd) {
 		if err := m.machine.End(now); err != nil {
 			m.errMsg = err.Error()
 		} else {
-			m.input.Reset()
-			m.input.Placeholder = "notes"
+			m.enterEndingNotes()
 		}
 	default:
 		m.errMsg = fmt.Sprintf("unknown command %q", cmd)
@@ -897,6 +930,16 @@ func (m Model) handleActiveCommand(val string) (tea.Model, tea.Cmd) {
 		return m, m.writeSentinelCmd()
 	}
 	return m, nil
+}
+
+// enterEndingNotes resets the note textarea and focuses it. Call at every
+// transition into StateEndingNotes.
+func (m *Model) enterEndingNotes() {
+	m.noteArea.SetValue("")
+	if m.width > 0 {
+		m.noteArea.SetWidth(max(m.width-4, 20))
+	}
+	m.noteArea.Focus()
 }
 
 func (m Model) handleEndingNotes(val string) (tea.Model, tea.Cmd) {
@@ -1422,8 +1465,12 @@ func (m Model) renderContent(b *strings.Builder) {
 		fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("Press Enter to end early"))
 	}
 
-	b.WriteString("  ")
-	b.WriteString(m.input.View())
+	if m.machine.State() == session.StateEndingNotes {
+		b.WriteString(m.noteArea.View())
+	} else {
+		b.WriteString("  ")
+		b.WriteString(m.input.View())
+	}
 	writeErr(b, m.errMsg)
 }
 
