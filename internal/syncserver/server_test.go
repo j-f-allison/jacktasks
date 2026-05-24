@@ -186,12 +186,13 @@ func TestPushPullProjects(t *testing.T) {
 		t.Fatalf("rows = %d, want 2", len(pullResp.Rows))
 	}
 
-	// Pull with since=ts should return 0 (no rows newer than ts).
-	resp = doRequest(t, srv, "GET", "/pull?table=projects&since="+itoa(ts), nil)
+	// Pull with since=as_of should return 0: using the bookmark from a completed
+	// pull as the next since value must not re-return already-seen rows.
+	resp = doRequest(t, srv, "GET", "/pull?table=projects&since="+itoa(pullResp.AsOf), nil)
 	var pullResp2 syncproto.PullResponse
 	decodeJSON(t, resp, &pullResp2)
 	if len(pullResp2.Rows) != 0 {
-		t.Errorf("pull since ts: got %d rows, want 0", len(pullResp2.Rows))
+		t.Errorf("pull since as_of: got %d rows, want 0", len(pullResp2.Rows))
 	}
 }
 

@@ -63,7 +63,7 @@ func handlePush(st *store.Store) http.HandlerFunc {
 			return
 		}
 
-		accepted, rejected, err := st.UpsertFromSync(r.Context(), table, req.Rows)
+		accepted, rejected, err := st.UpsertFromSync(r.Context(), table, req.Rows, time.Now().Unix())
 		if err != nil {
 			log.Printf("push %s: %v", table, err)
 			writeError(w, http.StatusInternalServerError, "upsert failed")
@@ -98,7 +98,7 @@ func handlePull(st *store.Store) http.HandlerFunc {
 		}
 
 		asOf := time.Now().Unix()
-		rows, err := st.PullSince(r.Context(), table, since)
+		rows, err := st.PullSinceArrived(r.Context(), table, since)
 		if err != nil {
 			log.Printf("pull %s since %d: %v", table, since, err)
 			writeError(w, http.StatusInternalServerError, "pull failed")

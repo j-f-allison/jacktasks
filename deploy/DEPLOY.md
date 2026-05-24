@@ -153,6 +153,7 @@ scp jacktasks-sync-linux <thinkcentre>:/tmp/jacktasks-sync
 # On ThinkCentre
 sudo systemctl stop jacktasks-sync
 sudo mv /tmp/jacktasks-sync /usr/local/bin/jacktasks-sync
+sudo chmod 755 /usr/local/bin/jacktasks-sync
 sudo systemctl start jacktasks-sync
 sudo systemctl status jacktasks-sync
 ```

@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
   deleted_at   INTEGER,
-  archived     INTEGER NOT NULL DEFAULT 0
+  archived     INTEGER NOT NULL DEFAULT 0,
+  arrived_at   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS categories (
@@ -14,7 +15,8 @@ CREATE TABLE IF NOT EXISTS categories (
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   deleted_at  INTEGER,
-  archived    INTEGER NOT NULL DEFAULT 0
+  archived    INTEGER NOT NULL DEFAULT 0,
+  arrived_at  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -28,7 +30,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   end_notes            TEXT,
   status               TEXT NOT NULL,
   created_at           INTEGER NOT NULL,
-  device_id            TEXT NOT NULL
+  device_id            TEXT NOT NULL,
+  arrived_at           INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS captures (
@@ -39,7 +42,8 @@ CREATE TABLE IF NOT EXISTS captures (
   cleared            INTEGER NOT NULL DEFAULT 0,
   sent_to_reminders  INTEGER NOT NULL DEFAULT 0,
   created_at         INTEGER NOT NULL,
-  updated_at         INTEGER NOT NULL DEFAULT 0
+  updated_at         INTEGER NOT NULL DEFAULT 0,
+  arrived_at         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sync_state (

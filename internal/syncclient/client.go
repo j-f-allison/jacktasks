@@ -102,7 +102,7 @@ func syncTable(
 	}
 
 	if len(pullResp.Rows) > 0 {
-		if _, _, err := st.UpsertFromSync(ctx, table, pullResp.Rows); err != nil {
+		if _, _, err := st.UpsertFromSync(ctx, table, pullResp.Rows, 0); err != nil {
 			return pushed, 0, fmt.Errorf("apply pulled rows: %w", err)
 		}
 	}

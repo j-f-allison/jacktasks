@@ -8,6 +8,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// arrivedAtBackfill maps each sync table to the client-side timestamp column
+// used to backfill arrived_at for rows that existed before the migration.
+var arrivedAtBackfill = map[string]string{
+	"projects":   "updated_at",
+	"categories": "updated_at",
+	"sessions":   "created_at",
+	"captures":   "created_at",
+}
+
 //go:embed schema.sql
 var schemaSQL string
 
@@ -43,6 +52,11 @@ func Open(path string) (*Store, error) {
 	if err := migrateCapturesUpdatedAt(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate captures.updated_at: %w", err)
+	}
+
+	if err := migrateArrivedAt(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate arrived_at: %w", err)
 	}
 
 	return &Store{db: db}, nil
@@ -90,6 +104,54 @@ func migrateCapturesUpdatedAt(db *sql.DB) error {
 	// issues when the column is added by this migration.
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_captures_updated ON captures(updated_at)`); err != nil {
 		return fmt.Errorf("create index: %w", err)
+	}
+	return nil
+}
+
+// migrateArrivedAt adds an arrived_at column to each sync table if absent, and
+// backfills existing rows using the table's best available client-side timestamp
+// so that a fresh pull (since=0) can still retrieve them. The column is used by
+// the server to track when a row was first received, enabling correct pull
+// filtering even when rows arrive out of chronological order.
+// Safe to call on a DB that already has the column (no-op per table).
+func migrateArrivedAt(db *sql.DB) error {
+	for table, backfillCol := range arrivedAtBackfill {
+		rows, err := db.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			return fmt.Errorf("table_info(%s): %w", table, err)
+		}
+
+		exists := false
+		for rows.Next() {
+			var cid int
+			var name, colType string
+			var notNull, pk int
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan table_info(%s): %w", table, err)
+			}
+			if name == "arrived_at" {
+				exists = true
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("table_info(%s) rows: %w", table, err)
+		}
+
+		if !exists {
+			if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN arrived_at INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("alter %s: %w", table, err)
+			}
+			if _, err := db.Exec("UPDATE " + table + " SET arrived_at = " + backfillCol + " WHERE arrived_at = 0"); err != nil {
+				return fmt.Errorf("backfill %s.arrived_at: %w", table, err)
+			}
+		}
+
+		if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_" + table + "_arrived ON " + table + "(arrived_at)"); err != nil {
+			return fmt.Errorf("index %s: %w", table, err)
+		}
 	}
 	return nil
 }
