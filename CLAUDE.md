@@ -57,9 +57,13 @@ These patterns are consistent across the existing code. New code should match.
 - **Test isolation.** Every test gets a fresh `newTestStore(t)` using `t.TempDir()`. No shared state between tests.
 - **No CHECK constraints in SQL when Go-layer validation exists.** Validation lives in the Go method (e.g. `SessionStatus.Valid()`). If we ever bypass the Go layer (raw SQL writes from another tool), we accept that no CHECK fires. This was an explicit trade-off; revisit if it bites.
 
-## At phase boundaries and good checkpoints
+## Logging changes
 
-At natural stopping points (phase complete, significant decision made, meaningful chunk of work done), ask the user: "Should I update PROJECT.md and LOG.md?" Do not auto-update on minor changes. The user decides what counts as worth recording.
+**Always append a LOG.md entry whenever code is changed in a session, before considering the work complete.** Even a one-line fix or a polish tweak gets a brief entry. The version bump rule and the LOG rule go together: if `make install` is needed, both `VERSION` *and* a LOG entry must be part of the change.
+
+Entry length should match the change: a single short paragraph for small fixes, a fuller writeup for phase boundaries or design decisions. Use the existing dated-section format (`## YYYY-MM-DD — short title`).
+
+PROJECT.md is different — only update it at phase boundaries or when architecture/scope shifts. Ask the user before editing PROJECT.md.
 
 ## What not to do
 
@@ -67,7 +71,7 @@ At natural stopping points (phase complete, significant decision made, meaningfu
 - **Don't move device_id to a config file.** It's deliberately in the DB so each machine has its own that travels with the data store.
 - **Don't add View/UI features ahead of the session loop.** Phase 2 is the core session flow with stdin prompts. Bubble Tea is Phase 3. Reminders integration is Phase 4. Maintain that order — each phase de-risks the next.
 - **Don't try to be a project manager.** Don't suggest reordering phases, adding milestones, or generating Gantt-style breakdowns unless asked. The user owns scheduling.
-- **Don't auto-update LOG.md on minor changes.** Append entries at phase boundaries or for genuine decisions, not for every code change.
+- **Don't skip LOG.md.** Every code-changing session gets at least a short entry — see "Logging changes" above. (Earlier guidance said the opposite; the rule has been updated because changes were slipping through unrecorded.)
 
 ## Verifying work
 

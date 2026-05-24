@@ -69,6 +69,7 @@ const (
 	uiExtraContinueDur         // entering duration for "continue session" (from WhatNext)
 	uiExtraStart               // startup screen: inbox + resume + new session
 	uiExtraRecover             // crash-recovery offer shown before the start screen
+	uiExtraReminderDispo       // after end notes: confirm whether to mark the originating reminder complete
 )
 
 // ── resume candidate ──────────────────────────────────────────────────────────
@@ -112,6 +113,16 @@ type Model struct {
 	// capture context text shown during session setup from "Do" or inbox item
 	doContextText string
 
+	// when a session was started from an inbox reminder, completion is deferred
+	// to the end of the session (asked on uiExtraReminderDispo). Cleared after
+	// the disposition is resolved.
+	pendingReminderID    string
+	pendingReminderTitle string
+
+	// notes value stashed while uiExtraReminderDispo is shown, so the save can
+	// proceed after the user answers the disposition prompt.
+	pendingEndNotes string
+
 	// captures disposed on the current WhatNext screen (key = capture ID)
 	capturesDisposed map[string]bool
 
@@ -144,6 +155,7 @@ type Model struct {
 	helpModel    help.Model      // for footer key hints
 	showFullHelp bool            // toggled by '?'
 	savingSession bool           // true while session DB write is in flight
+	flashOn       bool            // toggled by tick to flash the end-notes banner
 
 	// sync (Phase 6c): config plumbed from env at launch; non-empty URL+Token
 	// enables the "s) Sync now" menu option on the startup screen.
@@ -304,6 +316,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.prog.SetPercent(m.timerPct()))
 		}
 
+		// Flash the end-notes banner while the user hasn't started typing.
+		if machState == session.StateEndingNotes && m.noteArea.Value() == "" {
+			m.flashOn = !m.flashOn
+		} else {
+			m.flashOn = false
+		}
+
 		// Auto-end session when timer expires.
 		if machState == session.StateActive && m.machine.TimeRemaining(m.now) == 0 {
 			_ = m.machine.End(m.now)
@@ -428,8 +447,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// End notes uses a textarea; handle it before the textinput path.
-	if m.machine.State() == session.StateEndingNotes {
+	// End notes uses a textarea; handle it before the textinput path. The
+	// reminder-disposition prompt also overlays StateEndingNotes but uses the
+	// regular textinput (y/n), so skip the textarea path in that case.
+	if m.machine.State() == session.StateEndingNotes && m.extra != uiExtraReminderDispo {
 		if msg.Type == tea.KeyEnter {
 			return m.handleEndingNotes(strings.TrimSpace(m.noteArea.Value()))
 		}
@@ -460,6 +481,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.extra == uiExtraStart {
 		return m.handleStartScreen(val)
+	}
+
+	if m.extra == uiExtraReminderDispo {
+		return m.handleReminderDisposition(val)
 	}
 
 	switch m.machine.State() {
@@ -618,6 +643,10 @@ func (m Model) handleStartScreen(val string) (tea.Model, tea.Cmd) {
 	if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= len(m.inboxItems) {
 		item := m.inboxItems[n-1]
 		m.doContextText = item.Title
+		// Defer Reminders completion until end-of-session disposition prompt,
+		// so an aborted session doesn't falsely mark the reminder done.
+		m.pendingReminderID = item.ID
+		m.pendingReminderTitle = item.Title
 		m.inboxItems = nil
 		m.extra = uiExtraNone
 		m.resume = nil
@@ -625,7 +654,7 @@ func (m Model) handleStartScreen(val string) (tea.Model, tea.Cmd) {
 		_ = m.machine.BeginSetup()
 		m.input.Reset()
 		m.input.Placeholder = "choice"
-		return m, tea.Batch(m.loadProjectsCmd(), m.completeInboxItemCmd(item.ID))
+		return m, m.loadProjectsCmd()
 	}
 
 	switch val {
@@ -943,9 +972,46 @@ func (m *Model) enterEndingNotes() {
 }
 
 func (m Model) handleEndingNotes(val string) (tea.Model, tea.Cmd) {
+	// If this session was started from an inbox reminder, ask before
+	// marking it complete in Reminders. Save is deferred until the user
+	// answers y/n.
+	if m.pendingReminderID != "" {
+		m.pendingEndNotes = val
+		m.extra = uiExtraReminderDispo
+		m.input.Reset()
+		m.input.Placeholder = "y / n"
+		m.input.Focus()
+		return m, nil
+	}
 	_ = m.machine.SetEndNotes(val, m.now)
 	m.savingSession = true
 	return m, tea.Batch(m.saveSessionCmd(), m.sp.Tick)
+}
+
+// handleReminderDisposition resolves the post-session prompt asking whether to
+// mark the originating Reminders item complete. y → mark complete + save;
+// n → leave reminder active + save.
+func (m Model) handleReminderDisposition(val string) (tea.Model, tea.Cmd) {
+	v := strings.ToLower(strings.TrimSpace(val))
+	if v != "y" && v != "n" {
+		m.errMsg = "press y or n"
+		m.input.Reset()
+		return m, nil
+	}
+	reminderID := m.pendingReminderID
+	notes := m.pendingEndNotes
+	m.pendingReminderID = ""
+	m.pendingReminderTitle = ""
+	m.pendingEndNotes = ""
+	m.extra = uiExtraNone
+	m.errMsg = ""
+	_ = m.machine.SetEndNotes(notes, m.now)
+	m.savingSession = true
+	cmds := []tea.Cmd{m.saveSessionCmd(), m.sp.Tick}
+	if v == "y" && reminderID != "" && m.remClient != nil {
+		cmds = append(cmds, m.completeInboxItemCmd(reminderID))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m Model) handleWhatNext(val string) (tea.Model, tea.Cmd) {
@@ -1307,6 +1373,9 @@ func (m Model) screenName() string {
 	case session.StatePaused:
 		return "Paused"
 	case session.StateEndingNotes:
+		if m.extra == uiExtraReminderDispo {
+			return "Reminder Done?"
+		}
 		return "End Notes"
 	case session.StateWhatNext:
 		return "What Next"
@@ -1443,8 +1512,25 @@ func (m Model) renderContent(b *strings.Builder) {
 			StyleDim.Render("/ "+formatDuration(planned)))
 
 	case session.StateEndingNotes:
+		if m.extra == uiExtraReminderDispo {
+			fmt.Fprintf(b, "  Mark reminder complete?\n\n")
+			fmt.Fprintf(b, "  %s\n\n", StyleAccent.Render("\""+m.pendingReminderTitle+"\""))
+			fmt.Fprintf(b, "  %s  %s\n\n",
+				StyleSelected.Render("y) Yes, mark complete"),
+				StyleDim.Render("n) No, keep it active"))
+			break
+		}
 		writeCaptureList(b, m.machine.Captures())
-		fmt.Fprintf(b, "  End notes (Enter to skip):\n\n")
+		if m.noteArea.Value() == "" {
+			banner := "  ▶  SESSION ENDED — add notes or press Enter to skip  ◀"
+			style := StyleFlashOff
+			if m.flashOn {
+				style = StyleFlashOn
+			}
+			fmt.Fprintf(b, "%s\n\n", style.Render(banner))
+		} else {
+			fmt.Fprintf(b, "  End notes (Enter to skip):\n\n")
+		}
 
 	case session.StateWhatNext:
 		m.renderWhatNext(b)
@@ -1465,7 +1551,7 @@ func (m Model) renderContent(b *strings.Builder) {
 		fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("Press Enter to end early"))
 	}
 
-	if m.machine.State() == session.StateEndingNotes {
+	if m.machine.State() == session.StateEndingNotes && m.extra != uiExtraReminderDispo {
 		b.WriteString(m.noteArea.View())
 	} else {
 		b.WriteString("  ")

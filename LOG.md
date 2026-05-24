@@ -687,3 +687,43 @@ Issues found during first real use on the Mac Mini, plus a few UX improvements.
 **Install path changed from `/usr/local/bin` to `~/.local/bin`.** The only reason to use `/usr/local/bin` was that it's already in PATH — avoiding a `.zshrc` edit. Switching to `~/.local/bin` (add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` once) lets `make install` run without `sudo`. Makefile `PREFIX` default changed accordingly; `mkdir -p $(PREFIX)` added to the install target so the directory is created if absent. `PROJECT.md` and `CLAUDE.md` updated.
 
 **Tests:** 70 passing, unchanged.
+
+---
+
+## 2026-05-24 — Flashing end-notes banner (v1.0.1)
+
+A solid block of end-notes text was easy to miss when a session ended — the screen looked similar to Active/Paused and the user sometimes sat in front of it not realizing the session was over.
+
+**Done:** Added `StyleFlashOn` (white-on-red) and `StyleFlashOff` (red-on-default) in `styles.go`. New `flashOn bool` on the Model toggles on every `tickMsg` while in `StateEndingNotes` *and* `noteArea.Value() == ""` — i.e. only flashes while the user hasn't started typing. As soon as a keystroke lands in the textarea, the banner is replaced with the calmer `End notes (Enter to skip):` prompt and `flashOn` is forced false. Banner text: `▶  SESSION ENDED — add notes or press Enter to skip  ◀`.
+
+Version bumped from 1.0.0 → 1.0.1 in `Makefile` and `cmd/jacktasks/version.go`. Requires `make install` on each Mac.
+
+**Tests:** 70 passing, unchanged (TUI-only change).
+
+---
+
+## 2026-05-24 — Defer Reminders completion to end of session (v1.0.2)
+
+**Bug:** Selecting an inbox reminder on the startup screen immediately marked it complete in Apple Reminders (via `completeInboxItemCmd` batched alongside `loadProjectsCmd`). If the user then abandoned or never finished the session, the reminder was lost from Reminders. Risky — selection ≠ completion.
+
+**Fix:** Reminders completion is now deferred until the user has worked the session and submitted end notes. New flow:
+
+1. Selecting an inbox item stashes `pendingReminderID` and `pendingReminderTitle` on the Model. No EventKit call is fired at selection time. `doContextText` still carries the reminder title forward into setup for the "Doing: …" hint.
+2. After end notes are submitted, if `pendingReminderID != ""`, the input intercepts the save and shows a new `uiExtraReminderDispo` screen overlaying `StateEndingNotes`:
+   ```
+   Mark reminder complete?
+   "<reminder title>"
+   y) Yes, mark complete    n) No, keep it active
+   ```
+3. `y` fires `completeInboxItemCmd` alongside `saveSessionCmd`. `n` skips the EventKit call and just saves. Either way pending fields are cleared and the machine transitions to WhatNext.
+
+**Implementation notes:**
+- The dispo screen overlays `StateEndingNotes` rather than introducing a new session-package state — kept the pure state machine untouched. The textarea/textinput switch in `Update` and the renderer both check `m.extra != uiExtraReminderDispo` to use the y/n textinput instead of the notes textarea.
+- If a session is force-quit before reaching EndingNotes, `pendingReminderID` (in-memory only) is lost. The reminder stays active in Apple Reminders, which is the desired safer default — it'll show up again on next launch.
+- Sessions started via "Resume", "New Session", or a capture-`d` action never set `pendingReminderID`, so the dispo screen doesn't appear in those flows.
+
+Version bumped from 1.0.1 → 1.0.2 in `Makefile` and `cmd/jacktasks/version.go`. Requires `make install` on each Mac.
+
+**Also in this commit:** `CLAUDE.md` rule change — LOG.md entries are now mandatory on every code-changing session (previously ask-first). The flashing-banner entry above was backfilled because it had slipped through under the old rule.
+
+**Tests:** 70 passing, unchanged (TUI-only change).

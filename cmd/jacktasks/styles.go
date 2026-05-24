@@ -30,6 +30,8 @@ var (
 	StyleActive   = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
 	StylePaused   = lipgloss.NewStyle().Bold(true).Faint(true)
 	StyleBorder   = lipgloss.NewStyle().Foreground(colorBorder)
+	StyleFlashOn  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(colorError)
+	StyleFlashOff = lipgloss.NewStyle().Bold(true).Foreground(colorError)
 )
 
 // ── key bindings ──────────────────────────────────────────────────────────────
