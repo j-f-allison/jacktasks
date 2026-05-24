@@ -69,18 +69,20 @@ Two binaries, two stores, two sync layers — deliberately separated.
 All tables use UUID primary keys (TEXT) for sync-friendliness. Timestamps are Unix epoch seconds. `journal_mode=DELETE` (rollback journal, not WAL). Foreign keys enforced via `PRAGMA foreign_keys=ON`.
 
 ```sql
-projects    (id, name, created_at, updated_at, deleted_at?, archived)
-categories  (id, name, project_id?→projects, created_at, updated_at, deleted_at?, archived)
+projects    (id, name, created_at, updated_at, deleted_at?, archived, arrived_at)
+categories  (id, name, project_id?→projects, created_at, updated_at, deleted_at?, archived, arrived_at)
 sessions    (id, project_id?→projects, category_id→categories NOT NULL,
              planned_duration_min, actual_duration_sec, started_at, ended_at,
-             end_notes?, status, created_at, device_id)
+             end_notes?, status, created_at, device_id, arrived_at)
 captures    (id, session_id→sessions, text, captured_at,
-             cleared, sent_to_reminders, created_at)
+             cleared, sent_to_reminders, created_at, updated_at, arrived_at)
 sync_state  (table_name, last_pull_at?, last_push_at?)
 config      (key, value)
 ```
 
 Sessions are written once on session end — never edited. Captures get two single-flag updates (cleared, sent_to_reminders) but no other mutations.
+
+`arrived_at` is a server-side timestamp (Unix seconds) stamped by the sync server when a row is first received via `/push`. Clients store it as 0 for locally-created rows. The server's `/pull` handler filters on `arrived_at > since` (not `created_at`/`updated_at`), so late-arriving rows — old data from another device pushed after a client has already synced — are never silently missed. Added via `migrateArrivedAt` (ALTER TABLE ADD COLUMN, same migration pattern as `updated_at` on captures).
 
 **Projects** are the top-level grouping. **Categories** are per-project sub-labels (e.g. "Coding", "Planning") scoped to a specific project. A category's `project_id` is nullable; NULL means it was created on a no-project session and is not surfaced in any list — it's stored for analytics but the user never picks from a no-project category list.
 
@@ -249,7 +251,9 @@ Then `jacktasks sync` to push/pull. See `deploy/DEPLOY.md` for the full cross-Ma
 
 **Phase 6b — Client `jacktasks sync` subcommand (closed):** `internal/store/syncstate.go` — `GetSyncState`, `SetLastPushAt`, `SetLastPullAt` (independent upserts, neither clobbers the other). `UpdateProject` added to projects DAL. `internal/syncclient/` — `Sync` runs push-before-pull per table; bookmarks advanced per-table on success so partial sync is safe; formatted summary output. Subcommand dispatch in `cmd/jacktasks/main.go`: `jacktasks sync` (reads `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN`) vs TUI. 5 syncclient tests: round-trip, idempotent re-sync, LWW convergence, bad token, missing config. 68 tests total.
 
-**Phase 6c — Deploy + verify (MacBook side done; Mac Mini pending):** `Makefile` with `check` / `install` / `build-sync-linux` targets (install honors `PREFIX` for non-sudo installs). `deploy/` directory: `DEPLOY.md` step-by-step guide, `jacktasks-sync.service` systemd unit, `env.template`. Server deployed on ThinkCentre (Tailscale IP `100.70.19.55:8484`); systemd unit running cleanly under dedicated `jacktasks` user; `jacktasks sync` confirmed working from MacBook. **Pending:** Mac Mini bootstrap (launch TUI once → accept Reminders TCC → `jacktasks sync`) + cross-Mac convergence test. See `deploy/DEPLOY.md` steps 7–8.
+**Phase 6c — Deploy + verify (complete):** `Makefile` with `check` / `install` / `build-sync-linux` targets (install honors `PREFIX` for non-sudo installs). `deploy/` directory: `DEPLOY.md` step-by-step guide, `jacktasks-sync.service` systemd unit, `env.template`. Server deployed on ThinkCentre (Tailscale IP `100.70.19.55:8484`); systemd unit running cleanly under dedicated `jacktasks` user. MacBook and Mac Mini both syncing. Cross-Mac convergence verified.
+
+**Post-deploy sync bug fix:** The initial pull filter used `created_at`/`updated_at` (client-side timestamps) to answer "what rows has this client not seen yet?" This broke for late-arriving data: if Mac Mini synced first (setting `last_pull_at = now`), then MacBook pushed sessions created days earlier, Mac Mini's next pull filtered `WHERE created_at > last_pull_at` and got zero rows. Fixed by adding `arrived_at` to all four sync tables — the server stamps it on every push, and `/pull` filters on `arrived_at > since`. Client-side `PullSince` (used for gathering rows to push) is unchanged. `DEPLOY.md` update procedure also fixed to include `chmod 755` after binary replacement.
 
 **Pre-trial UI polish (closed):** `cmd/jacktasks/logo.go` — ASCII "JackTasks" banner on the startup screen, self-hides on narrow terminals. `s) Sync now` menu option on the startup screen (only shown when `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN` are exported in the launching shell); selecting it runs the same `syncclient.Sync` cycle as the `jacktasks sync` subcommand, with spinner + inline summary. No other behavior changes; 68 tests still pass.
 
@@ -276,6 +280,7 @@ Each row is a flat JSON object matching the table columns. Rules:
 - Timestamps: Unix epoch seconds (integers), same as DB storage.
 - NULL fields: JSON `null` (not empty string — wire is stricter than the Go↔SQL boundary).
 - Boolean fields (`cleared`, `sent_to_reminders`, `archived`): JSON integers 0/1 (matches DB storage).
+- `arrived_at` is not in the wire format — it is server-only and never transmitted to clients.
 
 ### Conflict rules
 

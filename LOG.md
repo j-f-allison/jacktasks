@@ -639,3 +639,21 @@ Two small additions before starting the trial period. No new features, no scope 
 **Build/test:** clean. 68 tests pass.
 
 **Operational note:** client-only change, so only `sudo make install` on each Mac is needed. ThinkCentre server is untouched.
+
+---
+
+## 2026-05-24 — Sync bug fix: arrived_at
+
+**Bug:** Mac Mini synced first (empty DB, `last_pull_at` set to ~now). MacBook then synced and pushed its sessions — but those sessions had `created_at` timestamps from days earlier. Mac Mini's subsequent syncs ran `WHERE created_at > last_pull_at` on the server and got zero rows. Late-arriving data was permanently invisible.
+
+**Root cause:** The pull filter column (`pullColumn["sessions"] = "created_at"`) is a client-side timestamp reflecting when the session happened, not when it arrived at the server. Any device that has already advanced its `last_pull_at` past the data's `created_at` will never see it, no matter how many times it syncs.
+
+**Fix:** Added `arrived_at INTEGER NOT NULL DEFAULT 0` to all four sync tables (`projects`, `categories`, `sessions`, `captures`). The server stamps `arrived_at = time.Now().Unix()` on every row it receives via `/push`. The server's `/pull` handler now calls `PullSinceArrived` (filters `WHERE arrived_at > since`) instead of `PullSince` (filters on `created_at`/`updated_at`). Client-side `PullSince` — used to gather local rows to push — is unchanged.
+
+**Migration:** `migrateArrivedAt` in `store.go`, same pattern as `migrateCapturesUpdatedAt`. Runs on both server and client DBs via `Open`. For existing rows, backfills `arrived_at` from `updated_at` (projects, categories) or `created_at` (sessions, captures) so a fresh pull (`since=0`) can still retrieve pre-migration data. Arrived_at indexes created in the migration, not in `schema.sql`, to avoid the same ordering hazard that affected `idx_captures_updated`.
+
+**One-time client fix:** Mac Mini's `sync_state.last_pull_at` had already advanced past the MacBook's data. Reset it to 0 on Mac Mini to force a fresh pull of all server data.
+
+**Also fixed:** `deploy/DEPLOY.md` "Updating the server binary" procedure was missing `chmod 755` after the binary `mv`. The first-time setup had it; the update section didn't. Hit this during deploy when systemd couldn't exec the new binary.
+
+**Result:** 68 tests pass. Wire format unchanged (`arrived_at` is server-only, never transmitted).
