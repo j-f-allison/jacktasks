@@ -675,3 +675,15 @@ Issues found during first real use on the Mac Mini, plus a few UX improvements.
 **Tokyo Night gradient logo.** The ASCII logo previously rendered in a flat `StyleTitle` purple. Now each rune gets its own foreground color interpolated left-to-right across three Tokyo Night stops: `#bb9af7` (purple) → `#7aa2f7` (blue) → `#7dcfff` (cyan). Color is computed in `logo.go` via a simple linear interpolation between stops; no new dependencies.
 
 **Result:** 70 tests pass.
+
+---
+
+## 2026-05-24 — Versioning and install path
+
+**Introduced SemVer versioning (v1.0.0).** The single source of truth is `VERSION := 1.0.0` in the Makefile. The binary bakes it in via `-ldflags "-X main.Version=$(VERSION)"`. `cmd/jacktasks/version.go` holds the Go-side `var Version` with the same value as a default so `go run` also shows the right version. The version is displayed on the start screen below the logo in `StyleDim`.
+
+**Bump rule (codified in CLAUDE.md):** any change that requires the user to run `make install` gets a version bump. PATCH for bug fixes and polish; MINOR for new commands, screens, or sync behavior; MAJOR for breaking schema changes. Both `VERSION` in `Makefile` and `Version` in `version.go` are updated in the same commit.
+
+**Install path changed from `/usr/local/bin` to `~/.local/bin`.** The only reason to use `/usr/local/bin` was that it's already in PATH — avoiding a `.zshrc` edit. Switching to `~/.local/bin` (add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` once) lets `make install` run without `sudo`. Makefile `PREFIX` default changed accordingly; `mkdir -p $(PREFIX)` added to the install target so the directory is created if absent. `PROJECT.md` and `CLAUDE.md` updated.
+
+**Tests:** 70 passing, unchanged.

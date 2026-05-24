@@ -1478,6 +1478,8 @@ func (m Model) renderContent(b *strings.Builder) {
 func (m Model) renderStartScreen(b *strings.Builder) {
 	if logo := renderLogo(m.width); logo != "" {
 		b.WriteString(logo)
+		fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("v"+Version))
+	} else {
 		b.WriteByte('\n')
 	}
 

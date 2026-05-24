@@ -23,6 +23,18 @@ These are the user's general preferences. They apply unless overridden in the mo
 - **Distinguish genuine problems from minor notes.** Signal which is which. Not every observation deserves equal weight.
 - **Don't manufacture criticism to seem rigorous.** If the work is good, say it's good.
 
+## Versioning
+
+The app uses SemVer (`MAJOR.MINOR.PATCH`). The single source of truth is `VERSION` in `Makefile`. The Go var `Version` in `cmd/jacktasks/version.go` holds the same value as a default for `go run`.
+
+**When to bump:**
+- Any change that requires the user to run `make install` (new binary on disk) gets a version bump.
+- PATCH: bug fixes, polish, no new commands or screens.
+- MINOR: new commands, new screens, new sync behavior, new config options.
+- MAJOR: breaking schema changes requiring migration, complete rewrites of core flows.
+
+**How to bump:** edit `VERSION` in `Makefile` and `Version` in `cmd/jacktasks/version.go` to match. Do both in the same commit.
+
 ## Workflow
 
 - **Tests must pass before moving on.** After any code change, run `go test ./...` and confirm green before claiming a chunk is done.

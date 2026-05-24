@@ -190,7 +190,7 @@ jacktasks/
 
 ```bash
 make check                # build + vet + test (pre-commit gate)
-make install              # install jacktasks TUI to /usr/local/bin (macOS)
+make install              # install jacktasks TUI to ~/.local/bin (no sudo; add to PATH in ~/.zshrc)
 make build-sync-linux     # cross-compile sync server for linux/amd64
 
 go run ./cmd/jacktasks    # run TUI from source
@@ -258,6 +258,8 @@ Then `jacktasks sync` to push/pull. See `deploy/DEPLOY.md` for the full cross-Ma
 **Pre-trial UI polish (closed):** `cmd/jacktasks/logo.go` — ASCII "JackTasks" banner on the startup screen, self-hides on narrow terminals. `s) Sync now` menu option on the startup screen (only shown when `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN` are exported in the launching shell); selecting it runs the same `syncclient.Sync` cycle as the `jacktasks sync` subcommand, with spinner + inline summary. No other behavior changes; 68 tests still pass.
 
 **Post-deploy bug fixes and polish (closed):** Several issues found during first real use on the Mac Mini. Start screen skip removed — the logo and menu always show on launch even when inbox is empty and no resume is available. Sessions ending with ≤5 min remaining are now marked `completed` instead of `ended_early`, preventing stale resume prompts for near-complete sessions; `checkResume` also suppresses candidates with ≤5 min remaining. End notes screen replaced single-line `textinput` with a `textarea` for word wrap (Enter still submits). j/k vim navigation now works on all list screens — previously the keys fell through to the text input despite being shown in the footer hints. ASCII logo upgraded to a per-character left-to-right Tokyo Night gradient: `#bb9af7` purple → `#7aa2f7` blue → `#7dcfff` cyan. 70 tests pass.
+
+**Versioning + install path (closed):** SemVer introduced starting at v1.0.0. `VERSION` in `Makefile` is the source of truth; baked into the binary via `-ldflags "-X main.Version=..."`. `cmd/jacktasks/version.go` holds the Go-side var (default matches Makefile). Version displayed on the start screen below the logo. `make install` now defaults to `~/.local/bin` (no sudo required); user adds `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` once.
 
 ## Sync protocol
 
