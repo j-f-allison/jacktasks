@@ -657,3 +657,21 @@ Two small additions before starting the trial period. No new features, no scope 
 **Also fixed:** `deploy/DEPLOY.md` "Updating the server binary" procedure was missing `chmod 755` after the binary `mv`. The first-time setup had it; the update section didn't. Hit this during deploy when systemd couldn't exec the new binary.
 
 **Result:** 68 tests pass. Wire format unchanged (`arrived_at` is server-only, never transmitted).
+
+---
+
+## 2026-05-24 — Post-deploy bug fixes and polish
+
+Issues found during first real use on the Mac Mini, plus a few UX improvements.
+
+**Start screen skip removed.** When inbox loaded empty with no resume candidate, the app jumped straight to project setup, skipping the logo and menu entirely. Removed the skip — the start screen always renders.
+
+**Near-complete sessions auto-complete.** `End()` in `session.go` now marks a session `completed` when ≤5 min remain (`plannedSec - actualSec <= 5*60`), rather than `ended_early`. Prevents the resume offer from appearing for sessions that were essentially finished. `checkResume` also raised its suppression threshold from `remaining <= 0` to `remaining <= 5` to catch any pre-fix `ended_early` rows already in the DB. New test `TestEndNearCompleteIsCompleted` pins the boundary (5 min remaining = completed, 6 min = ended_early).
+
+**End notes word wrap.** The End Notes screen was using a single-line `textinput`; long notes ran off the right edge. Replaced with a `textarea` component (already in `charmbracelet/bubbles`). Text wraps at terminal width, Enter still submits, no flow changes. Width tracks terminal resize via `WindowSizeMsg`.
+
+**j/k vim navigation.** The footer key hints already showed `↑/k` and `↓/j` (declared in `styles.go`), but the keys weren't actually handled — `tea.KeyRunes` fell through to the text input. Added a `case tea.KeyRunes` branch in the list-screen navigation block so `"j"` and `"k"` move the cursor and return before the input is updated. No menu shortcuts use j or k, so no conflicts.
+
+**Tokyo Night gradient logo.** The ASCII logo previously rendered in a flat `StyleTitle` purple. Now each rune gets its own foreground color interpolated left-to-right across three Tokyo Night stops: `#bb9af7` (purple) → `#7aa2f7` (blue) → `#7dcfff` (cyan). Color is computed in `logo.go` via a simple linear interpolation between stops; no new dependencies.
+
+**Result:** 70 tests pass.

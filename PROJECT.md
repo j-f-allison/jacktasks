@@ -257,6 +257,8 @@ Then `jacktasks sync` to push/pull. See `deploy/DEPLOY.md` for the full cross-Ma
 
 **Pre-trial UI polish (closed):** `cmd/jacktasks/logo.go` — ASCII "JackTasks" banner on the startup screen, self-hides on narrow terminals. `s) Sync now` menu option on the startup screen (only shown when `JACKTASKS_SYNC_URL` + `JACKTASKS_SYNC_TOKEN` are exported in the launching shell); selecting it runs the same `syncclient.Sync` cycle as the `jacktasks sync` subcommand, with spinner + inline summary. No other behavior changes; 68 tests still pass.
 
+**Post-deploy bug fixes and polish (closed):** Several issues found during first real use on the Mac Mini. Start screen skip removed — the logo and menu always show on launch even when inbox is empty and no resume is available. Sessions ending with ≤5 min remaining are now marked `completed` instead of `ended_early`, preventing stale resume prompts for near-complete sessions; `checkResume` also suppresses candidates with ≤5 min remaining. End notes screen replaced single-line `textinput` with a `textarea` for word wrap (Enter still submits). j/k vim navigation now works on all list screens — previously the keys fell through to the text input despite being shown in the footer hints. ASCII logo upgraded to a per-character left-to-right Tokyo Night gradient: `#bb9af7` purple → `#7aa2f7` blue → `#7dcfff` cyan. 70 tests pass.
+
 ## Sync protocol
 
 REST over HTTP, JSON bodies. Server binds to Tailscale interface only. Auth: `Authorization: Bearer <token>` from `JACKTASKS_SYNC_TOKEN` env var.
