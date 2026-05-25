@@ -41,7 +41,7 @@ Two binaries, two stores, two sync layers — deliberately separated.
 
 **Sync layer 1 — Reminders → both Macs:** handled by iCloud. jacktasks reads from the dedicated `jacktasks-inbox` list at project-selection time. No custom sync code involved.
 
-**Sync layer 2 — jacktasks session data across Macs:** handled by a custom Go HTTP service on the home Ubuntu server. Manual `jacktasks sync` command, last-write-wins for category/project edits, pure-append for sessions/captures.
+**Sync layer 2 — jacktasks session data across Macs:** handled by a custom Go HTTP service on the home Ubuntu server. Background auto-sync on TUI startup and after each session save (non-blocking; status glyph on start and WhatNext screens). The `jacktasks sync` CLI subcommand and the start-screen `s) Sync now` action remain available as manual escape hatches. Last-write-wins for category/project edits, pure-append for sessions/captures.
 
 ## Tech stack
 
@@ -308,7 +308,6 @@ To prevent scope creep:
 - View Reminders standalone view
 - Idle / away-from-keyboard detection
 - macOS notifications on session end
-- Auto-sync (periodic or on launch)
 - Mobile companion app
 - Tags or multi-category projects
 - Export to CSV / JSON

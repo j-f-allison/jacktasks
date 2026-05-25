@@ -243,6 +243,71 @@ func TestEndCompletedStatus(t *testing.T) {
 	}
 }
 
+func TestResumeFromEndingNotesAfterTimerExpiry(t *testing.T) {
+	m, now := setupToActive(t, 25)
+
+	// timer expires naturally
+	endAt := now.Add(25 * time.Minute)
+	if err := m.End(endAt); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if m.State() != StateEndingNotes {
+		t.Fatalf("setup: want EndingNotes, got %s", m.State())
+	}
+
+	if err := m.ResumeFromEndingNotes(endAt); err != nil {
+		t.Fatalf("ResumeFromEndingNotes: %v", err)
+	}
+	if m.State() != StateActive {
+		t.Fatalf("state = %s, want Active", m.State())
+	}
+	if !m.endedAt.IsZero() {
+		t.Errorf("endedAt should be cleared")
+	}
+	if m.status != "" {
+		t.Errorf("status = %q, want cleared", m.status)
+	}
+	// Timer had expired (targetEnd == endAt), so it should be reset to now
+	// so a follow-up Extend gives meaningful remaining time.
+	if !m.targetEnd.Equal(endAt) {
+		t.Errorf("targetEnd = %v, want reset to now (%v)", m.targetEnd, endAt)
+	}
+
+	// Extend by 5 should give exactly 5 min remaining.
+	if err := m.Extend(5, endAt); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	if rem := m.TimeRemaining(endAt); rem != 5*time.Minute {
+		t.Errorf("TimeRemaining = %v, want 5m", rem)
+	}
+}
+
+func TestResumeFromEndingNotesEarlyEnd(t *testing.T) {
+	// User ended at 10 of a 25-min session, then Tabs to extend. The
+	// original targetEnd is still 15 min in the future, so it should be
+	// preserved (not reset to now).
+	m, now := setupToActive(t, 25)
+	endAt := now.Add(10 * time.Minute)
+	if err := m.End(endAt); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	originalTarget := m.targetEnd
+
+	if err := m.ResumeFromEndingNotes(endAt); err != nil {
+		t.Fatalf("ResumeFromEndingNotes: %v", err)
+	}
+	if !m.targetEnd.Equal(originalTarget) {
+		t.Errorf("targetEnd = %v, want preserved %v", m.targetEnd, originalTarget)
+	}
+}
+
+func TestResumeFromEndingNotesWrongState(t *testing.T) {
+	m, now := setupToActive(t, 25)
+	if err := m.ResumeFromEndingNotes(now); err == nil {
+		t.Fatalf("want ErrWrongState from Active, got nil")
+	}
+}
+
 func TestEndEndedEarlyStatus(t *testing.T) {
 	m, now := setupToActive(t, 25)
 

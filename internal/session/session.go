@@ -283,6 +283,26 @@ func (m *Machine) End(now time.Time) error {
 	return nil
 }
 
+// ResumeFromEndingNotes reverses End: clears the end timestamp/status/notes
+// and returns the machine to Active. Used by the Tab shortcut on the
+// end-notes screen, which lets the user undo an accidental "end" (typically
+// triggered by the auto-end when the timer reaches 0). If the original
+// target end is in the past, it is reset to now so a follow-up Extend gives
+// the user a meaningful amount of working time.
+func (m *Machine) ResumeFromEndingNotes(now time.Time) error {
+	if m.state != StateEndingNotes {
+		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
+	}
+	m.endedAt = time.Time{}
+	m.endNotes = ""
+	m.status = ""
+	if m.targetEnd.Before(now) {
+		m.targetEnd = now
+	}
+	m.state = StateActive
+	return nil
+}
+
 // SetEndNotes records the end-of-session notes and advances to WhatNext.
 // Valid from EndingNotes.
 func (m *Machine) SetEndNotes(notes string, now time.Time) error {

@@ -4,6 +4,48 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-25 — Auto-sync on startup and after session save (v1.2.0)
+
+After a few days of real use, "Auto-sync" was removed from the out-of-V1 list and implemented. Two trigger points:
+
+1. **On TUI startup.** `Init()` fires a background sync when `JACKTASKS_SYNC_URL` and `JACKTASKS_SYNC_TOKEN` are set. Fire-and-forget — the start screen and inbox render normally; the sync result arrives as a `syncDoneMsg` and updates a status indicator.
+2. **After session save.** When `sessionSavedMsg` lands (session is on local disk), kick off the same background sync. Skipped if another sync is already in flight.
+
+The session is always saved locally first — sync failure never blocks the flow. The manual `s) Sync now` start-screen action and the `jacktasks sync` CLI subcommand remain as escape hatches.
+
+Visual cue: a small status line — `⟳ syncing…`, `✓ synced <age>`, or `✗ sync failed <age>` — rendered on the start screen (below the menu) and on the WhatNext screen (below the actions). Manual sync still takes over the start screen with the existing "Syncing…" spinner; auto-sync is intentionally non-intrusive.
+
+Implementation notes:
+- `runSyncCmd` now takes a `manual bool` and stamps it onto `syncDoneMsg.manual`. The handler treats manual and auto differently: manual resets cursor/placeholder and surfaces errors as `errMsg`; auto silently updates `lastSyncAt` / `lastSyncOK` and refreshes `syncSummary` only when the user is still on the start screen.
+- `newModel` pre-sets `m.syncing = true` when sync is configured so that an "s) Sync now" press immediately after launch doesn't race the startup auto-sync. (Init returns only a Cmd, so it can't mutate the model itself.)
+
+Server-side "latest version" check (so a stale binary on the Mac Mini shows an "update available" hint) is deliberately deferred — it'd need a wire-protocol change plus a publish step. Will revisit.
+
+Bumped to v1.2.0 (new sync behavior in the TUI; manual sync path preserved).
+
+---
+
+## 2026-05-25 — Tab to extend from end-notes (v1.1.0)
+
+Added a shortcut on the post-session note screen: pressing **Tab** reverses the End and extends the live session by 5 minutes, returning to Active. Motivation: when a timer expires while the user is still mid-flow, they want to keep going as one continuous session — not split into a saved-then-continued pair. This approximates the existing `ext` command for the case where they missed it before the timer hit zero. Once back in Active, they can `ext <n>` for further extensions.
+
+Design choice debated and revised: an earlier attempt jumped from Tab into the existing "Continue session" path (save + new session with same project/category). User pushed back: they want it logged as one continuous session, not two adjacent ones. The current implementation reverses End, so no save happens until the user actually ends for real later.
+
+Implementation:
+- New `Machine.ResumeFromEndingNotes(now)` in `internal/session/session.go`. Requires `StateEndingNotes`, clears `endedAt`/`status`/`endNotes`, and resets `targetEnd` to `now` if it had already passed (so a follow-up `Extend` produces meaningful remaining time). Returns to `StateActive`.
+- `handleEndingNotesExtend` in `cmd/jacktasks/model.go` chains `ResumeFromEndingNotes` + `Extend(5, now)` and re-focuses the textinput on the active command line. Any text already typed into the note textarea is discarded — the session is continuing, so there are no end notes yet.
+- Tab is intercepted in `updateKey` before the textarea consumes it, so Enter and free-text still work as before.
+- Banner text on the end-notes screen now reads `Enter to skip · Tab for +5m`.
+- Sentinel is rewritten after the extend so crash recovery sees the new targetEnd.
+- If the session was started from an inbox reminder, the pending reminder disposition is left intact — it'll fire on the next real End, as expected.
+- 5-min default lives in `tabExtendMinutes` (single constant in `model.go`).
+
+Tests: added `TestResumeFromEndingNotesAfterTimerExpiry`, `TestResumeFromEndingNotesEarlyEnd`, `TestResumeFromEndingNotesWrongState`. All 73 tests pass.
+
+Bumped to v1.1.0 (new interaction path / new machine method).
+
+---
+
 ## 2026-05-23 — Pre-implementation design
 
 The Swift version was a false start. CLI/TUI chosen as the V2 direction. Open question: what language?

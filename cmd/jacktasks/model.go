@@ -56,6 +56,7 @@ type fatalMsg struct{ err error }
 type syncDoneMsg struct {
 	summary string
 	err     error
+	manual  bool // true if user-triggered via "s) Sync now"; false for auto-sync
 }
 
 // ── UI sub-states ─────────────────────────────────────────────────────────────
@@ -160,8 +161,11 @@ type Model struct {
 	// sync (Phase 6c): config plumbed from env at launch; non-empty URL+Token
 	// enables the "s) Sync now" menu option on the startup screen.
 	syncCfg     syncclient.Config
-	syncing     bool   // true while a manual sync is in flight
+	syncing     bool   // true while any sync (manual or auto) is in flight
+	syncManual  bool   // true when the in-flight sync is user-triggered (affects rendering)
 	syncSummary string // last sync result, shown on the start screen
+	lastSyncAt  time.Time // when the last sync attempt completed; zero = never
+	lastSyncOK  bool   // whether the last sync succeeded; only meaningful if !lastSyncAt.IsZero()
 }
 
 func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, remClient reminders.Client, syncCfg syncclient.Config) Model {
@@ -214,6 +218,11 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 	}
 
 	m.initStartup()
+	// If sync is configured, the Init Cmd will fire an auto-sync; mark it
+	// in-flight up front so a manual "s) Sync now" press doesn't race it.
+	if m.syncCfg.URL != "" && m.syncCfg.Token != "" {
+		m.syncing = true
+	}
 	return m
 }
 
@@ -274,6 +283,11 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.remClient != nil && m.extra == uiExtraStart {
 		cmds = append(cmds, m.loadInboxCmd(), m.sp.Tick)
+	}
+	// Fire a background sync on startup. Fire-and-forget — the UI never waits
+	// on it and the menu/inbox keep rendering normally.
+	if m.syncConfigured() {
+		cmds = append(cmds, m.runSyncCmd(false))
 	}
 	return tea.Batch(cmds...)
 }
@@ -365,7 +379,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.input.Reset()
 		m.input.Placeholder = "choice"
-		return m, m.clearSentinelCmd()
+		cmds := []tea.Cmd{m.clearSentinelCmd()}
+		// Kick off a background sync now that the session is on disk. Skip
+		// if another sync is already in flight — the next session-save (or
+		// a manual trigger) will catch any drift.
+		if m.syncConfigured() && !m.syncing {
+			m.syncing = true
+			cmds = append(cmds, m.runSyncCmd(false))
+		}
+		return m, tea.Batch(cmds...)
 
 	case inboxLoadedMsg:
 		m.inboxLoaded = true
@@ -377,13 +399,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncDoneMsg:
 		m.syncing = false
-		m.cursor = 0
-		m.input.Reset()
-		m.input.Placeholder = "choice"
-		if msg.err != nil {
-			m.errMsg = "sync error: " + msg.err.Error()
+		m.lastSyncAt = time.Now()
+		m.lastSyncOK = msg.err == nil
+		if msg.manual {
+			m.syncManual = false
+			m.cursor = 0
+			m.input.Reset()
+			m.input.Placeholder = "choice"
 			m.syncSummary = msg.summary
-		} else {
+			if msg.err != nil {
+				m.errMsg = "sync error: " + msg.err.Error()
+			}
+		} else if m.extra == uiExtraStart {
+			// Background sync completed while user is still on the start
+			// screen: update the displayed summary so they see fresh state.
 			m.syncSummary = msg.summary
 		}
 		return m, nil
@@ -454,6 +483,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyEnter {
 			return m.handleEndingNotes(strings.TrimSpace(m.noteArea.Value()))
 		}
+		if msg.Type == tea.KeyTab {
+			return m.handleEndingNotesExtend()
+		}
 		var taCmd tea.Cmd
 		m.noteArea, taCmd = m.noteArea.Update(msg)
 		return m, taCmd
@@ -521,6 +553,38 @@ func (m Model) isLoading() bool {
 // syncConfigured reports whether the env-supplied sync config is usable.
 func (m Model) syncConfigured() bool {
 	return m.syncCfg.URL != "" && m.syncCfg.Token != ""
+}
+
+// syncStatusLine returns a short one-line indicator for auto-sync state.
+// Returns "" when sync isn't configured, or when no sync has run this session
+// and none is in flight. Renders as: "⟳ syncing…", "✓ synced <age>", or
+// "✗ sync failed <age>".
+func (m Model) syncStatusLine() string {
+	if !m.syncConfigured() {
+		return ""
+	}
+	if m.syncing && !m.syncManual {
+		return StyleDim.Render("⟳ syncing…")
+	}
+	if m.lastSyncAt.IsZero() {
+		return ""
+	}
+	age := m.now.Sub(m.lastSyncAt)
+	var ageStr string
+	switch {
+	case age < 10*time.Second:
+		ageStr = "just now"
+	case age < time.Minute:
+		ageStr = fmt.Sprintf("%ds ago", int(age.Seconds()))
+	case age < time.Hour:
+		ageStr = fmt.Sprintf("%dm ago", int(age.Minutes()))
+	default:
+		ageStr = fmt.Sprintf("%dh ago", int(age.Hours()))
+	}
+	if m.lastSyncOK {
+		return StyleDim.Render("✓ synced " + ageStr)
+	}
+	return StyleError.Render("✗ sync failed " + ageStr)
 }
 
 // timerPct returns the progress fraction (0.0–1.0) for the active timer or break.
@@ -697,9 +761,10 @@ func (m Model) handleStartScreen(val string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.syncing = true
+		m.syncManual = true
 		m.syncSummary = ""
 		m.input.Reset()
-		return m, tea.Batch(m.runSyncCmd(), m.sp.Tick)
+		return m, tea.Batch(m.runSyncCmd(true), m.sp.Tick)
 
 	case "q":
 		return m, tea.Quit
@@ -988,6 +1053,31 @@ func (m Model) handleEndingNotes(val string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.saveSessionCmd(), m.sp.Tick)
 }
 
+// tabExtendMinutes is the default extension applied when the user hits Tab
+// on the end-notes screen to undo an accidental end. The user can extend
+// further from Active with "ext <n>".
+const tabExtendMinutes = 5
+
+// handleEndingNotesExtend is the Tab shortcut: undo End, extend the session
+// by tabExtendMinutes, and go back to Active. Any text in the note textarea
+// is discarded — the session is continuing, so there are no "end notes" yet.
+func (m Model) handleEndingNotesExtend() (tea.Model, tea.Cmd) {
+	if err := m.machine.ResumeFromEndingNotes(m.now); err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	if err := m.machine.Extend(tabExtendMinutes, m.now); err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	m.noteArea.SetValue("")
+	m.noteArea.Blur()
+	m.input.Reset()
+	m.input.Placeholder = "command"
+	m.input.Focus()
+	return m, m.writeSentinelCmd()
+}
+
 // handleReminderDisposition resolves the post-session prompt asking whether to
 // mark the originating Reminders item complete. y → mark complete + save;
 // n → leave reminder active + save.
@@ -1146,12 +1236,12 @@ func (m Model) loadProjectsCmd() tea.Cmd {
 	}
 }
 
-func (m Model) runSyncCmd() tea.Cmd {
+func (m Model) runSyncCmd(manual bool) tea.Cmd {
 	ctx, s, cfg := m.ctx, m.store, m.syncCfg
 	return func() tea.Msg {
 		var buf bytes.Buffer
 		err := syncclient.Sync(ctx, s, cfg, &buf)
-		return syncDoneMsg{summary: strings.TrimSpace(buf.String()), err: err}
+		return syncDoneMsg{summary: strings.TrimSpace(buf.String()), err: err, manual: manual}
 	}
 }
 
@@ -1522,14 +1612,14 @@ func (m Model) renderContent(b *strings.Builder) {
 		}
 		writeCaptureList(b, m.machine.Captures())
 		if m.noteArea.Value() == "" {
-			banner := "  ▶  SESSION ENDED — add notes or press Enter to skip  ◀"
+			banner := fmt.Sprintf("  ▶  SESSION ENDED — Enter to skip · Tab for +%dm  ◀", tabExtendMinutes)
 			style := StyleFlashOff
 			if m.flashOn {
 				style = StyleFlashOn
 			}
 			fmt.Fprintf(b, "%s\n\n", style.Render(banner))
 		} else {
-			fmt.Fprintf(b, "  End notes (Enter to skip):\n\n")
+			fmt.Fprintf(b, "  End notes (Enter to save · Tab for +%dm):\n\n", tabExtendMinutes)
 		}
 
 	case session.StateWhatNext:
@@ -1577,7 +1667,7 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 		return
 	}
 
-	if m.syncing {
+	if m.syncing && m.syncManual {
 		fmt.Fprintf(b, "  %s Syncing...\n\n", m.sp.View())
 		b.WriteString("  ")
 		b.WriteString(m.input.View())
@@ -1612,10 +1702,15 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 	}
 	fmt.Fprintf(b, "  %s\n\n", renderListItem(m.cursor == cursorIdx, "q) Quit"))
 
+	if status := m.syncStatusLine(); status != "" {
+		fmt.Fprintf(b, "  %s\n", status)
+	}
 	if m.syncSummary != "" {
 		for _, line := range strings.Split(m.syncSummary, "\n") {
 			fmt.Fprintf(b, "  %s\n", StyleDim.Render(line))
 		}
+	}
+	if m.syncSummary != "" || m.syncStatusLine() != "" {
 		fmt.Fprintln(b)
 	}
 
@@ -1663,6 +1758,10 @@ func (m Model) renderWhatNext(b *strings.Builder) {
 		fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == i, a))
 	}
 	fmt.Fprintln(b)
+
+	if status := m.syncStatusLine(); status != "" {
+		fmt.Fprintf(b, "  %s\n\n", status)
+	}
 
 	b.WriteString("  ")
 	b.WriteString(m.input.View())
