@@ -51,22 +51,32 @@ Design notes:
 
 Larger surface than the items above, but the design is settled. Each is one focused session of work, or maybe two.
 
-### Dailies (category-level targets)
+### Dailies and Weeklies (recurring category targets)
 
-Categories can carry an optional daily target in minutes and an optional weekday schedule. Examples: "Keybr — 30 min, weekdays only," "Reading — 20 min, every day." Sessions accumulate against the target naturally because they're already category-scoped.
+Categories can carry an optional recurring target — daily or weekly — with an optional minute goal and (for dailies) an optional weekday schedule. Sessions accumulate against the target naturally because they're already category-scoped.
+
+Examples:
+- "Keybr — 30 min/day, weekdays only" (daily)
+- "Reading — 20 min/day, every day" (daily)
+- "Weekly review — 30 min/week" (weekly)
+- "Publish a blog post — once/week, no minute target" (weekly, presence-only)
 
 Schema:
-- `categories.target_minutes INTEGER` — NULL = no target.
-- `categories.schedule_mask INTEGER` — NULL = every day; otherwise a 7-bit field (bit 0 = Mon, bit 6 = Sun). `0b0011111` = weekdays.
+- `categories.target_minutes INTEGER` — NULL = no minute goal (any session this period counts as completion).
+- `categories.target_period TEXT` — NULL = no recurrence; otherwise `day` or `week`.
+- `categories.schedule_mask INTEGER` — only meaningful when `target_period = 'day'`; 7-bit field (bit 0 = Mon, bit 6 = Sun). NULL = every day. `0b0011111` = weekdays.
 
 UI:
-- Inline edit on the existing category selection screen. Cursor highlights a category; press `t` to open a small input for target + schedule. No new screen, no management UI.
-- HUD shows progress toward today's relevant Daily during an active session ("Keybr: 12/30 min today").
-- Streak per Daily is computed at query time from `sessions`, not stored. Days outside `schedule_mask` don't break the streak.
+- Inline edit on the existing category selection screen. Cursor highlights a category; press `t` to open a small input for period + minute target + (if daily) schedule. No new screen, no management UI.
+- HUD shows progress for the active session's category against its current period: "Keybr: 12/30 min today" or "Weekly review: 15/30 min this week."
+- Streak per recurring target is computed at query time from `sessions`, not stored. Days outside `schedule_mask` (for dailies) keep the daily streak alive; weeks where the target was met keep the weekly streak alive.
 
 Design notes:
-- Category-scoped, not project-scoped. Project-level targets ("30 min on jacktasks in any category") aren't needed for the keybr-style use case and would muddy the model. Add later only if a real need surfaces.
-- The MMO framing implies "quests." Resist the urge to add a Quest entity — it duplicates categories. Dailies *are* categories with targets.
+- Dailies and Weeklies share schema and UI — one feature, two scheduling modes. Could be shipped separately (daily first) but the design is unified.
+- Category-scoped, not project-scoped. Project-level targets aren't needed for current use cases and would muddy the model.
+- The MMO framing implies "quests." Resist the urge to add a Quest entity — it duplicates categories. Dailies and Weeklies *are* categories with recurring targets.
+- Week boundary: Monday-to-Sunday by default (ISO 8601). Configurable in TOML if Sunday-start ever becomes a real preference.
+- NULL `target_minutes` with non-NULL `target_period` = "any session this period counts as done." Useful for tasks where consistency matters but minutes don't ("ship a weekly post").
 - These are personal data and sync naturally via existing categories sync (LWW on `updated_at`). No new sync work.
 - Migration follows the established pattern (ALTER TABLE ADD COLUMN, same as `captures.updated_at` and `arrived_at`).
 
@@ -110,6 +120,48 @@ Open design questions:
 
 Design notes:
 - Don't pick a UX here yet. The trial period should produce real demand signals — "I wanted to see today's stuff and couldn't" is a useful complaint that hasn't been surfaced yet.
+
+### Hierarchical projects with file-based authoring
+
+A project can be defined with an ordered sequence of steps. Sessions against such a project select a step instead of a free category. After end notes, the user is prompted whether the step is complete; marking complete advances the project's cursor.
+
+Source of truth model: an external file (markdown, probably) defines the project structure. `jacktasks import <file>` ingests it. Post-import, the DB owns the state and syncs normally. To modify: edit the file and re-import.
+
+Flow:
+- Current: Project → Category → Duration → Active → End notes → WhatNext
+- New (stepped projects): Project (marked as stepped) → Step (ordered, uncompleted first) → Duration → Active → End notes → "Did you complete '\<step\>'? y/n" → WhatNext
+
+Open design questions — all genuinely need answers before this can be specced:
+
+1. **Schema shape.** Extend `categories` (add `order_index`, `completed_at`, `is_step`) vs. new `project_steps` table referencing project + category. The separate table keeps categories pure and is probably the right call.
+
+2. **File format.** Markdown is the user-preferred starting point — easy to author, readable in any editor. Likely dialect:
+   ```markdown
+   # Project Name
+   ## Steps
+   - [ ] First step text
+   - [x] Already-completed step
+   - [ ] Another step
+   ```
+   Top-level `- [ ]` / `- [x]` lines are steps; everything else is ignored. Strict enough to parse cleanly. JSON or TOML are fallbacks if markdown identity issues prove unmanageable.
+
+3. **Step identity across re-imports.** The hard problem. If a step is renamed in the source file, is it the same step (just retitled) or a new one? Three approaches:
+   - **Stable UUIDs written back into the file:** `- [ ] {abc123} step text`. Robust against rename, slightly ugly. Probably the right answer.
+   - **Fuzzy text matching at re-import:** tolerates rename but fails on similar steps and is hard to debug.
+   - **Sidecar mapping file:** `project.md` plus `project.md.jacktasks-ids.json`. Clean separation but two files to keep together.
+   Resolve before writing the importer.
+
+4. **File location and sync.** Source files are not synced; the DB is. Implications: the file only needs to exist on the machine where authoring/editing happens; step definitions and completion state sync via the DB; re-import from another machine requires copying the file (or maintaining it in a git repo somewhere). Acceptable for the single-user case.
+
+5. **Ad-hoc work within a stepped project.** Sometimes work doesn't map to a step ("fix bug found during step 3"). Either allow free category selection as an escape hatch, or require everything to be a step. The escape hatch is probably right; force is annoying.
+
+6. **Sync of completion.** Step completion is a state change on a single row, not a new session row. Use LWW on a `completed_at` column. Sync as part of the steps table.
+
+Design notes:
+- Steps replace categories within a stepped project; they don't coexist. The step *is* the work.
+- Mark-completion happens after session end, not during. Sessions log work regardless of completion status — you can do five sessions on one step before marking it done.
+- Project authoring stays out of the TUI by design. Keeps TUI complexity down and means the source file is always primary.
+- This is the largest feature on the roadmap. Strongly recommend running with Dailies/Weeklies and the smaller items first — real workflow data will sharpen this spec significantly.
 
 ---
 
