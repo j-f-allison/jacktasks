@@ -16,6 +16,7 @@ var tableColumns = map[string][]string{
 	},
 	"categories": {
 		"id", "name", "project_id", "created_at", "updated_at", "deleted_at", "archived",
+		"target_minutes", "target_period", "schedule_mask",
 	},
 	"sessions": {
 		"id", "project_id", "category_id",
@@ -178,18 +179,23 @@ func upsertProject(ctx context.Context, db *sql.DB, row map[string]any, arrivedA
 // upsertCategory: last-write-wins on updated_at.
 func upsertCategory(ctx context.Context, db *sql.DB, row map[string]any, arrivedAt int64) error {
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO categories (id, name, project_id, created_at, updated_at, deleted_at, archived, arrived_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO categories (id, name, project_id, created_at, updated_at, deleted_at, archived,
+		                        target_minutes, target_period, schedule_mask, arrived_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-		  name       = excluded.name,
-		  project_id = excluded.project_id,
-		  updated_at = excluded.updated_at,
-		  deleted_at = excluded.deleted_at,
-		  archived   = excluded.archived,
-		  arrived_at = excluded.arrived_at
+		  name           = excluded.name,
+		  project_id     = excluded.project_id,
+		  updated_at     = excluded.updated_at,
+		  deleted_at     = excluded.deleted_at,
+		  archived       = excluded.archived,
+		  target_minutes = excluded.target_minutes,
+		  target_period  = excluded.target_period,
+		  schedule_mask  = excluded.schedule_mask,
+		  arrived_at     = excluded.arrived_at
 		WHERE excluded.updated_at > categories.updated_at`,
 		row["id"], row["name"], row["project_id"], row["created_at"],
-		row["updated_at"], row["deleted_at"], row["archived"], arrivedAt,
+		row["updated_at"], row["deleted_at"], row["archived"],
+		row["target_minutes"], row["target_period"], row["schedule_mask"], arrivedAt,
 	)
 	return err
 }

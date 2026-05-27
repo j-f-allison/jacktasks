@@ -47,34 +47,7 @@ Design notes:
 
 Larger surface than the items above, but the design is settled. Each is one focused session of work, or maybe two.
 
-### Dailies and Weeklies (recurring category targets)
-
-Categories can carry an optional recurring target — daily or weekly — with an optional minute goal and (for dailies) an optional weekday schedule. Sessions accumulate against the target naturally because they're already category-scoped.
-
-Examples:
-- "Keybr — 30 min/day, weekdays only" (daily)
-- "Reading — 20 min/day, every day" (daily)
-- "Weekly review — 30 min/week" (weekly)
-- "Publish a blog post — once/week, no minute target" (weekly, presence-only)
-
-Schema:
-- `categories.target_minutes INTEGER` — NULL = no minute goal (any session this period counts as completion).
-- `categories.target_period TEXT` — NULL = no recurrence; otherwise `day` or `week`.
-- `categories.schedule_mask INTEGER` — only meaningful when `target_period = 'day'`; 7-bit field (bit 0 = Mon, bit 6 = Sun). NULL = every day. `0b0011111` = weekdays.
-
-UI:
-- Inline edit on the existing category selection screen. Cursor highlights a category; press `t` to open a small input for period + minute target + (if daily) schedule. No new screen, no management UI.
-- HUD shows progress for the active session's category against its current period: "Keybr: 12/30 min today" or "Weekly review: 15/30 min this week."
-- Streak per recurring target is computed at query time from `sessions`, not stored. Days outside `schedule_mask` (for dailies) keep the daily streak alive; weeks where the target was met keep the weekly streak alive.
-
-Design notes:
-- Dailies and Weeklies share schema and UI — one feature, two scheduling modes. Could be shipped separately (daily first) but the design is unified.
-- Category-scoped, not project-scoped. Project-level targets aren't needed for current use cases and would muddy the model.
-- The MMO framing implies "quests." Resist the urge to add a Quest entity — it duplicates categories. Dailies and Weeklies *are* categories with recurring targets.
-- Week boundary: Monday-to-Sunday by default (ISO 8601). Configurable in TOML if Sunday-start ever becomes a real preference.
-- NULL `target_minutes` with non-NULL `target_period` = "any session this period counts as done." Useful for tasks where consistency matters but minutes don't ("ship a weekly post").
-- These are personal data and sync naturally via existing categories sync (LWW on `updated_at`). No new sync work.
-- Migration follows the established pattern (ALTER TABLE ADD COLUMN, same as `captures.updated_at` and `arrived_at`).
+### Dailies and Weeklies — shipped in v1.6.0 (see PROJECT.md)
 
 ### Session-count target (TOML)
 

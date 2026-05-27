@@ -9,14 +9,17 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 CREATE TABLE IF NOT EXISTS categories (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  project_id  TEXT REFERENCES projects(id),
-  created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL,
-  deleted_at  INTEGER,
-  archived    INTEGER NOT NULL DEFAULT 0,
-  arrived_at  INTEGER NOT NULL DEFAULT 0
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  project_id      TEXT REFERENCES projects(id),
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  deleted_at      INTEGER,
+  archived        INTEGER NOT NULL DEFAULT 0,
+  arrived_at      INTEGER NOT NULL DEFAULT 0,
+  target_minutes  INTEGER,
+  target_period   TEXT,
+  schedule_mask   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS sessions (

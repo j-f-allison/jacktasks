@@ -125,6 +125,75 @@ func TestGetCategory(t *testing.T) {
 	}
 }
 
+func TestSetCategoryTarget(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	proj, _ := s.CreateProject(ctx, "P")
+	cat, err := s.CreateCategory(ctx, "Keybr", proj.ID)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Initially no target.
+	if cat.HasTarget() {
+		t.Error("new category should have no target")
+	}
+
+	// Set a minute/day target with weekday mask.
+	mins := 30
+	mask := 31 // weekdays
+	if err := s.SetCategoryTarget(ctx, cat.ID, &mins, "day", &mask); err != nil {
+		t.Fatalf("set target: %v", err)
+	}
+
+	got, err := s.GetCategory(ctx, cat.ID)
+	if err != nil {
+		t.Fatalf("get after set: %v", err)
+	}
+	if !got.HasTarget() {
+		t.Error("should have target after set")
+	}
+	if got.TargetPeriod != "day" {
+		t.Errorf("period = %q, want %q", got.TargetPeriod, "day")
+	}
+	if got.TargetMinutes == nil || *got.TargetMinutes != 30 {
+		t.Errorf("minutes = %v, want 30", got.TargetMinutes)
+	}
+	if got.ScheduleMask == nil || *got.ScheduleMask != 31 {
+		t.Errorf("mask = %v, want 31", got.ScheduleMask)
+	}
+
+	// Set a presence-only weekly target.
+	if err := s.SetCategoryTarget(ctx, cat.ID, nil, "week", nil); err != nil {
+		t.Fatalf("set weekly target: %v", err)
+	}
+	got2, _ := s.GetCategory(ctx, cat.ID)
+	if got2.TargetMinutes != nil {
+		t.Errorf("presence-only should have nil minutes, got %v", got2.TargetMinutes)
+	}
+	if got2.TargetPeriod != "week" {
+		t.Errorf("period = %q, want week", got2.TargetPeriod)
+	}
+	if got2.ScheduleMask != nil {
+		t.Errorf("weekly target should have nil mask, got %v", got2.ScheduleMask)
+	}
+
+	// Clear the target.
+	if err := s.SetCategoryTarget(ctx, cat.ID, nil, "", nil); err != nil {
+		t.Fatalf("clear target: %v", err)
+	}
+	got3, _ := s.GetCategory(ctx, cat.ID)
+	if got3.HasTarget() {
+		t.Error("target should be cleared")
+	}
+
+	// ErrNotFound on unknown ID.
+	if err := s.SetCategoryTarget(ctx, "nope", nil, "day", nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("got %v, want ErrNotFound", err)
+	}
+}
+
 func TestCreateOrGetCategoryByName(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

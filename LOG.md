@@ -4,6 +4,35 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-26 — Dailies & Weeklies: recurring category targets + streaks (v1.6.0)
+
+Adds optional recurring targets to categories (daily or weekly, with minute goal or presence-only, with optional weekday schedule for dailies), plus query-time streak computation and an in-session HUD.
+
+**Schema:** Three nullable columns added to `categories` via `migrateCategoryTargets` in `store.go`: `target_minutes INTEGER`, `target_period TEXT` (`'day'`/`'week'`), `schedule_mask INTEGER` (7-bit weekday bitmask, bit 0 = Monday). Columns also added to `schema.sql` for fresh DBs. Migration is idempotent (PRAGMA table_info check per column).
+
+**Store (`internal/store/`):**
+- `Category` struct extended with `TargetMinutes *int`, `TargetPeriod string`, `ScheduleMask *int`, and `HasTarget() bool`. All four `scanCategory` call sites updated.
+- `SetCategoryTarget(ctx, id, minutes, period, mask)` — UPDATE + `updated_at` bump; syncs via existing categories LWW sync.
+- `SumCategorySecondsBetween` and `CategoryActiveBetween` — progress queries for the current period.
+- `streak.go` — `CategoryStreak(ctx, store, cat, now)` walks periods backward (daily: day-by-day respecting `schedule_mask`, skipping off-days without breaking; weekly: ISO Mon–Sun weeks). Current in-progress period never breaks streak. Capped at 366 days / 53 weeks. Uses exported `StartOfWeekMonday`.
+- Sync: `tableColumns["categories"]` and `upsertCategory` updated with the three new columns. LWW unchanged.
+
+**Parser (`internal/target/`):** new pure package.
+- `Parse(s)` — handles `none`, `30/day`, `/day`, `30/day MTWTF`, `/week`, `30/week`. Returns typed error on bad input.
+- `Format(minutes, period, mask)` — inverse for UI annotations.
+- `DayScheduled(mask, weekday)` — used by streak walker.
+- Weekday tokens use positional MTWTFSS matching (handles ambiguous T and S letters).
+
+**TUI (`cmd/jacktasks/model.go`):**
+- New `uiExtraTargetEdit` state. Press `t` on a highlighted category in the category-selection screen to open a compact target editor (Escape to cancel). On save, updates DB and in-memory category list; cursor restored to the edited row.
+- Category list annotations: each category with a target shows a dim `(30 min/day, weekdays)` suffix.
+- HUD progress line on Active, Paused, and WhatNext screens: `Keybr: 12/30 min today · 🔥 4-day streak` (or weekly variant). Loaded async via `loadCategoryProgressCmd` when entering Active and after each session save. Zero `catPeriodSec`/`catStreak` on new session start.
+- Footer hint updated: `t set target` shown on category-selection screen; overlay hints shown during target edit.
+
+15 new tests (target: 4 suites; store: SetCategoryTarget round-trip, SumCategorySecondsBetween, CategoryActiveBetween, streak: 7 cases). 123 tests pass total.
+
+---
+
 ## 2026-05-26 — TOML config foundation + daily_session_target (v1.5.0)
 
 Introduces `~/.config/jacktasks/config.toml` as the user-editable config surface, backed by `github.com/BurntSushi/toml`. New `internal/config/` package: `Config` struct + `Load(path)`. Missing file = fine (defaults everywhere). Parse error = print to stderr and exit non-zero — no silent fallback.

@@ -12,13 +12,21 @@ import (
 
 // Category is a sub-label scoped to a project (or project-less when ProjectID is empty).
 type Category struct {
-	ID        string
-	Name      string
-	ProjectID string // empty when NULL (no-project category)
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	DeletedAt *time.Time
-	Archived  bool
+	ID            string
+	Name          string
+	ProjectID     string // empty when NULL (no-project category)
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	DeletedAt     *time.Time
+	Archived      bool
+	TargetMinutes *int   // nil = no minute goal (presence-only or no target)
+	TargetPeriod  string // "" = no recurrence; "day" or "week"
+	ScheduleMask  *int   // nil = every day (only meaningful when TargetPeriod = "day")
+}
+
+// HasTarget reports whether this category has a recurring target set.
+func (c Category) HasTarget() bool {
+	return c.TargetPeriod != ""
 }
 
 // ErrNotFound is returned when a lookup finds no matching row.
@@ -56,14 +64,16 @@ func (s *Store) ListCategoriesByProject(ctx context.Context, projectID string) (
 	var err error
 	if projectID == "" {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived
+			`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
+			        target_minutes, target_period, schedule_mask
 			 FROM categories
 			 WHERE project_id IS NULL AND deleted_at IS NULL AND archived = 0
 			 ORDER BY name COLLATE NOCASE`,
 		)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived
+			`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
+			        target_minutes, target_period, schedule_mask
 			 FROM categories
 			 WHERE project_id = ? AND deleted_at IS NULL AND archived = 0
 			 ORDER BY name COLLATE NOCASE`,
@@ -89,7 +99,8 @@ func (s *Store) ListCategoriesByProject(ctx context.Context, projectID string) (
 // GetCategory returns the category with the given id. Returns ErrNotFound if no row matches.
 func (s *Store) GetCategory(ctx context.Context, id string) (*Category, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived
+		`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
+		        target_minutes, target_period, schedule_mask
 		 FROM categories WHERE id = ?`,
 		id,
 	)
@@ -107,7 +118,8 @@ func (s *Store) GetCategory(ctx context.Context, id string) (*Category, error) {
 // If found, returns it; otherwise inserts and returns a new one.
 func (s *Store) CreateOrGetCategoryByName(ctx context.Context, name, projectID string) (*Category, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived
+		`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
+		        target_minutes, target_period, schedule_mask
 		 FROM categories WHERE name = ? AND project_id IS NULL AND deleted_at IS NULL`,
 		name,
 	)
@@ -132,8 +144,14 @@ func scanCategory(r rowScanner) (Category, error) {
 	var projectID sql.NullString
 	var deletedAt sql.NullInt64
 	var archived int
+	var targetMinutes sql.NullInt64
+	var targetPeriod sql.NullString
+	var scheduleMask sql.NullInt64
 
-	if err := r.Scan(&c.ID, &c.Name, &projectID, &createdAt, &updatedAt, &deletedAt, &archived); err != nil {
+	if err := r.Scan(
+		&c.ID, &c.Name, &projectID, &createdAt, &updatedAt, &deletedAt, &archived,
+		&targetMinutes, &targetPeriod, &scheduleMask,
+	); err != nil {
 		return c, err
 	}
 	if projectID.Valid {
@@ -146,5 +164,51 @@ func scanCategory(r rowScanner) (Category, error) {
 		c.DeletedAt = &t
 	}
 	c.Archived = archived != 0
+	if targetMinutes.Valid {
+		n := int(targetMinutes.Int64)
+		c.TargetMinutes = &n
+	}
+	if targetPeriod.Valid {
+		c.TargetPeriod = targetPeriod.String
+	}
+	if scheduleMask.Valid {
+		n := int(scheduleMask.Int64)
+		c.ScheduleMask = &n
+	}
 	return c, nil
+}
+
+// SetCategoryTarget updates the recurring target for a category and bumps
+// updated_at so the change propagates via sync (LWW). Pass period="" / nil
+// pointers to clear. Returns ErrNotFound if no row matches.
+func (s *Store) SetCategoryTarget(ctx context.Context, id string, minutes *int, period string, mask *int) error {
+	var minArg, maskArg any
+	if minutes != nil {
+		minArg = *minutes
+	}
+	var perArg any
+	if period != "" {
+		perArg = period
+	}
+	if mask != nil {
+		maskArg = *mask
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE categories
+		 SET target_minutes = ?, target_period = ?, schedule_mask = ?, updated_at = ?
+		 WHERE id = ?`,
+		minArg, perArg, maskArg, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("set category target: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

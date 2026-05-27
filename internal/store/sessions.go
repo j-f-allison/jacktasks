@@ -189,6 +189,38 @@ func (s *Store) CountTodaySessions(ctx context.Context, now time.Time) (int, err
 	return n, nil
 }
 
+// SumCategorySecondsBetween returns the total actual_duration_sec for sessions
+// of the given category whose started_at falls in [start, end).
+func (s *Store) SumCategorySecondsBetween(ctx context.Context, categoryID string, start, end int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(actual_duration_sec), 0)
+		 FROM sessions
+		 WHERE category_id = ? AND started_at >= ? AND started_at < ?`,
+		categoryID, start, end,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("sum category seconds: %w", err)
+	}
+	return n, nil
+}
+
+// CategoryActiveBetween reports whether any session for the given category
+// started within [start, end). Used for presence-only target checks.
+func (s *Store) CategoryActiveBetween(ctx context.Context, categoryID string, start, end int64) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions
+		 WHERE category_id = ? AND started_at >= ? AND started_at < ?
+		 LIMIT 1`,
+		categoryID, start, end,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("category active between: %w", err)
+	}
+	return n > 0, nil
+}
+
 func scanSession(r rowScanner) (Session, error) {
 	var sess Session
 	var startedAt, endedAt, createdAt int64

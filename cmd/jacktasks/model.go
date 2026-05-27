@@ -24,6 +24,7 @@ import (
 	"github.com/j-f-allison/jacktasks/internal/session"
 	"github.com/j-f-allison/jacktasks/internal/store"
 	"github.com/j-f-allison/jacktasks/internal/syncclient"
+	"github.com/j-f-allison/jacktasks/internal/target"
 )
 
 // ── messages ──────────────────────────────────────────────────────────────────
@@ -70,6 +71,12 @@ type projRemindersLoadedMsg struct {
 	err   error
 }
 
+type categoryProgressMsg struct {
+	periodSec int  // actual_duration_sec summed for the current period
+	streak    int  // consecutive periods met
+	err       error
+}
+
 // ── UI sub-states ─────────────────────────────────────────────────────────────
 
 // uiExtra covers UI modes that don't map 1:1 to session.Machine states.
@@ -83,6 +90,7 @@ const (
 	uiExtraRecover               // crash-recovery offer shown before the start screen
 	uiExtraReminderDispo         // after end notes: confirm whether to mark the originating reminder complete
 	uiExtraRemListPicker         // picker shown when user presses 'l' on a project to set its Reminders list
+	uiExtraTargetEdit            // overlay when user presses 't' on a category to set its recurring target
 )
 
 // ── resume candidate ──────────────────────────────────────────────────────────
@@ -122,6 +130,13 @@ type Model struct {
 	// list picker overlay ('l' on project screen)
 	remListsEditIdx int      // index into m.projects of the project being edited
 	remLists        []string // all available Reminders list names (nil = not yet loaded)
+
+	// target editor overlay ('t' on category screen)
+	targetEditIdx int // index into m.categories of the category being edited
+
+	// HUD progress for the active session's category
+	catPeriodSec int // total actual seconds in the current period
+	catStreak    int // consecutive periods met
 
 	// loaded for setup screens
 	categories []store.Category
@@ -441,6 +456,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncing = true
 			cmds = append(cmds, m.runSyncCmd(false))
 		}
+		// Refresh the category HUD progress after the new session is written.
+		if cmd := m.loadCategoryProgressCmd(m.activeCategoryForProgress()); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		return m, tea.Batch(cmds...)
 
 	case inboxLoadedMsg:
@@ -479,6 +498,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case categoryProgressMsg:
+		if msg.err == nil {
+			m.catPeriodSec = msg.periodSec
+			m.catStreak = msg.streak
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
@@ -498,6 +524,16 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "?" && state != session.StateActive && state != session.StatePaused {
 		m.showFullHelp = !m.showFullHelp
 		m.helpModel.ShowAll = m.showFullHelp
+		return m, nil
+	}
+
+	// Escape cancels the target editor overlay.
+	if msg.Type == tea.KeyEscape && m.extra == uiExtraTargetEdit {
+		m.extra = uiExtraNone
+		m.cursor = m.targetEditIdx
+		m.input.Reset()
+		m.input.Placeholder = "choice"
+		m.errMsg = ""
 		return m, nil
 	}
 
@@ -539,6 +575,19 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.input.Reset()
 					m.input.Placeholder = "choice"
 					return m, m.loadRemListsCmd()
+				}
+			case "t":
+				// 't' on the category selection screen opens the target editor for
+				// the currently highlighted category (cursor 0..len(m.categories)-1).
+				if state == session.StateSetupCategory && m.extra == uiExtraNone &&
+					m.cursor < len(m.categories) {
+					m.targetEditIdx = m.cursor
+					cat := m.categories[m.targetEditIdx]
+					m.extra = uiExtraTargetEdit
+					m.input.Reset()
+					m.input.SetValue(target.Format(cat.TargetMinutes, cat.TargetPeriod, cat.ScheduleMask))
+					m.input.Placeholder = "e.g. 30/day MTWTF  or  /week  or  none"
+					return m, nil
 				}
 			}
 		}
@@ -589,6 +638,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.extra == uiExtraRemListPicker {
 		return m.handleRemListPicker(val)
+	}
+
+	if m.extra == uiExtraTargetEdit {
+		return m.handleTargetEdit(val)
 	}
 
 	switch m.machine.State() {
@@ -1027,6 +1080,28 @@ func (m Model) handleRemListPicker(val string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleTargetEdit(val string) (tea.Model, tea.Cmd) {
+	mins, period, mask, err := target.Parse(val)
+	if err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	cat := m.categories[m.targetEditIdx]
+	if err := m.store.SetCategoryTarget(m.ctx, cat.ID, mins, period, mask); err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	// Update the in-memory copy.
+	m.categories[m.targetEditIdx].TargetMinutes = mins
+	m.categories[m.targetEditIdx].TargetPeriod = period
+	m.categories[m.targetEditIdx].ScheduleMask = mask
+	m.extra = uiExtraNone
+	m.cursor = m.targetEditIdx // return cursor to the edited category
+	m.input.Reset()
+	m.input.Placeholder = "choice"
+	return m, nil
+}
+
 func (m Model) handleProjectInput(val string) (tea.Model, tea.Cmd) {
 	if m.extra == uiExtraNewName {
 		if val == "" {
@@ -1101,7 +1176,33 @@ func (m Model) handleDurationInput(val string) (tea.Model, tea.Cmd) {
 	_ = m.machine.SetDuration(n, m.now)
 	m.input.Reset()
 	m.input.Placeholder = "command"
-	return m, m.writeSentinelCmd()
+	m.catPeriodSec = 0
+	m.catStreak = 0
+	cmds := []tea.Cmd{m.writeSentinelCmd()}
+	if cmd := m.loadCategoryProgressCmd(m.activeCategoryForProgress()); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// activeCategoryForProgress returns the Category struct for the current session's
+// category, looked up from m.categories or directly from the store. Returns a
+// zero Category (no target) when not found.
+func (m Model) activeCategoryForProgress() store.Category {
+	catID := m.machine.CategoryID()
+	for _, c := range m.categories {
+		if c.ID == catID {
+			return c
+		}
+	}
+	// Fall back to a direct DB lookup (e.g. after resume or continue-session).
+	if catID != "" {
+		c, err := m.store.GetCategory(m.ctx, catID)
+		if err == nil {
+			return *c
+		}
+	}
+	return store.Category{}
 }
 
 func (m Model) handleActiveCommand(val string) (tea.Model, tea.Cmd) {
@@ -1426,6 +1527,41 @@ func (m Model) loadProjRemindersCmd(listName string) tea.Cmd {
 	}
 }
 
+// loadCategoryProgressCmd fetches progress and streak for the active session's
+// category. Returns a zero categoryProgressMsg if the category has no target.
+func (m Model) loadCategoryProgressCmd(cat store.Category) tea.Cmd {
+	if !cat.HasTarget() {
+		return nil
+	}
+	s := m.store
+	ctx := m.ctx
+	now := m.now
+	return func() tea.Msg {
+		var periodSec int
+		var err error
+
+		if cat.TargetPeriod == target.PeriodDay {
+			loc := now.Location()
+			y, mo, d := now.Date()
+			dayStart := time.Date(y, mo, d, 0, 0, 0, 0, loc).Unix()
+			dayEnd := time.Date(y, mo, d+1, 0, 0, 0, 0, loc).Unix()
+			periodSec, err = s.SumCategorySecondsBetween(ctx, cat.ID, dayStart, dayEnd)
+		} else {
+			// Weekly
+			loc := now.Location()
+			weekStart := store.StartOfWeekMonday(now, loc)
+			weekEnd := weekStart.AddDate(0, 0, 7)
+			periodSec, err = s.SumCategorySecondsBetween(ctx, cat.ID, weekStart.Unix(), weekEnd.Unix())
+		}
+		if err != nil {
+			return categoryProgressMsg{err: err}
+		}
+
+		streak, err := store.CategoryStreak(ctx, s, cat, now)
+		return categoryProgressMsg{periodSec: periodSec, streak: streak, err: err}
+	}
+}
+
 func (m Model) clearCaptureCmd(captureID string) tea.Cmd {
 	s, ctx := m.store, m.ctx
 	return func() tea.Msg {
@@ -1601,6 +1737,13 @@ func (m Model) footerHint() string {
 	if m.machine.State() == session.StateSetupProject && m.extra == uiExtraNone && m.remClient != nil {
 		return "↑↓ / j/k navigate  •  l set reminders list  •  enter select  •  q quit"
 	}
+	// Category selection: show 't' hint and target-edit hint.
+	if m.machine.State() == session.StateSetupCategory && m.extra == uiExtraNone && m.machine.ProjectID() != "" {
+		return "↑↓ / j/k navigate  •  t set target  •  enter select  •  q quit"
+	}
+	if m.extra == uiExtraTargetEdit {
+		return "enter to save  •  esc to cancel"
+	}
 	if m.width > 0 {
 		m.helpModel.Width = m.width
 	}
@@ -1620,6 +1763,9 @@ func (m Model) screenName() string {
 	}
 	if m.extra == uiExtraRemListPicker {
 		return "Set Reminders List"
+	}
+	if m.extra == uiExtraTargetEdit {
+		return "Set Target"
 	}
 	switch m.machine.State() {
 	case session.StateSetupProject:
@@ -1756,7 +1902,11 @@ func (m Model) renderContent(b *strings.Builder) {
 			}
 		} else {
 			fmt.Fprintf(b, "  Select a category for %s:\n\n", StyleAccent.Render(m.selectedProjName))
-			if m.extra == uiExtraNewName {
+			if m.extra == uiExtraTargetEdit {
+				cat := m.categories[m.targetEditIdx]
+				fmt.Fprintf(b, "  Set target for %s:\n\n", StyleAccent.Render(cat.Name))
+				fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("e.g. 30/day MTWTF  •  /week  •  30/week  •  none"))
+			} else if m.extra == uiExtraNewName {
 				fmt.Fprintf(b, "  New category name:\n\n")
 				if m.doContextText != "" {
 					fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("(press Enter to use the text above, or type a new name)"))
@@ -1765,6 +1915,9 @@ func (m Model) renderContent(b *strings.Builder) {
 				// Existing project categories.
 				for i, c := range m.categories {
 					label := fmt.Sprintf("%d) %s", i+1, c.Name)
+					if ann := target.Format(c.TargetMinutes, c.TargetPeriod, c.ScheduleMask); ann != "" {
+						label += StyleDim.Render("  ("+ann+")")
+					}
 					fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == i, label))
 				}
 				// Per-project Reminders section (when the project has an associated list).
@@ -1798,6 +1951,9 @@ func (m Model) renderContent(b *strings.Builder) {
 		fmt.Fprintf(b, "  %s  %s\n\n",
 			StyleTimer.Render(formatDuration(rem)),
 			StyleDim.Render("/ "+formatDuration(planned)))
+		if line := m.categoryProgressLine(m.activeCategoryForProgress()); line != "" {
+			fmt.Fprintf(b, "  %s\n\n", StyleDim.Render(line))
+		}
 
 	case session.StatePaused:
 		rem := m.machine.TimeRemaining(m.now)
@@ -1811,6 +1967,9 @@ func (m Model) renderContent(b *strings.Builder) {
 		fmt.Fprintf(b, "  %s  %s\n\n",
 			StyleTimer.Render(formatDuration(rem)),
 			StyleDim.Render("/ "+formatDuration(planned)))
+		if line := m.categoryProgressLine(m.activeCategoryForProgress()); line != "" {
+			fmt.Fprintf(b, "  %s\n\n", StyleDim.Render(line))
+		}
 
 	case session.StateEndingNotes:
 		if m.extra == uiExtraReminderDispo {
@@ -1975,15 +2134,20 @@ func (m Model) renderWhatNext(b *strings.Builder) {
 	}
 	fmt.Fprintln(b)
 
+	catLine := m.categoryProgressLine(m.activeCategoryForProgress())
+	syncLine := m.syncStatusLine()
 	if m.dailyTarget > 0 {
 		fmt.Fprintf(b, "  %s\n", StyleDim.Render(
 			fmt.Sprintf("Sessions today: %d/%d", m.todaySessions, m.dailyTarget),
 		))
 	}
-	if status := m.syncStatusLine(); status != "" {
-		fmt.Fprintf(b, "  %s\n", status)
+	if catLine != "" {
+		fmt.Fprintf(b, "  %s\n", StyleDim.Render(catLine))
 	}
-	if m.dailyTarget > 0 || m.syncStatusLine() != "" {
+	if syncLine != "" {
+		fmt.Fprintf(b, "  %s\n", syncLine)
+	}
+	if m.dailyTarget > 0 || catLine != "" || syncLine != "" {
 		fmt.Fprintln(b)
 	}
 
@@ -2017,6 +2181,50 @@ func writeErr(b *strings.Builder, msg string) {
 	if msg != "" {
 		fmt.Fprintf(b, "\n  %s", StyleError.Render(msg))
 	}
+}
+
+// categoryProgressLine returns the HUD line for the active category's recurring
+// target progress, e.g. "Keybr: 12/30 min today · 🔥 4-day streak".
+// Returns "" if the category has no target.
+func (m Model) categoryProgressLine(cat store.Category) string {
+	if !cat.HasTarget() {
+		return ""
+	}
+
+	var progress string
+	if cat.TargetPeriod == target.PeriodDay {
+		if cat.TargetMinutes != nil {
+			doneMins := m.catPeriodSec / 60
+			progress = fmt.Sprintf("%s: %d/%d min today", cat.Name, doneMins, *cat.TargetMinutes)
+		} else {
+			if m.catPeriodSec > 0 {
+				progress = fmt.Sprintf("%s: done today", cat.Name)
+			} else {
+				progress = fmt.Sprintf("%s: not yet today", cat.Name)
+			}
+		}
+	} else {
+		if cat.TargetMinutes != nil {
+			doneMins := m.catPeriodSec / 60
+			progress = fmt.Sprintf("%s: %d/%d min this week", cat.Name, doneMins, *cat.TargetMinutes)
+		} else {
+			if m.catPeriodSec > 0 {
+				progress = fmt.Sprintf("%s: done this week", cat.Name)
+			} else {
+				progress = fmt.Sprintf("%s: not yet this week", cat.Name)
+			}
+		}
+	}
+
+	if m.catStreak > 0 {
+		unit := "days"
+		if cat.TargetPeriod == target.PeriodWeek {
+			unit = "wks"
+		}
+		progress += fmt.Sprintf(" · 🔥 %d-%s streak", m.catStreak, unit)
+	}
+
+	return progress
 }
 
 func formatDuration(d time.Duration) string {

@@ -64,7 +64,55 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("migrate projects.reminders_list_name: %w", err)
 	}
 
+	if err := migrateCategoryTargets(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate categories target columns: %w", err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// migrateCategoryTargets adds target_minutes, target_period, and schedule_mask
+// columns to categories if absent. All nullable — no backfill needed.
+// Safe to call on a DB that already has the columns (no-op).
+func migrateCategoryTargets(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(categories)")
+	if err != nil {
+		return fmt.Errorf("table_info(categories): %w", err)
+	}
+	defer rows.Close()
+
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan table_info(categories): %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("table_info rows: %w", err)
+	}
+
+	adds := []struct {
+		col string
+		def string
+	}{
+		{"target_minutes", "ALTER TABLE categories ADD COLUMN target_minutes INTEGER"},
+		{"target_period", "ALTER TABLE categories ADD COLUMN target_period TEXT"},
+		{"schedule_mask", "ALTER TABLE categories ADD COLUMN schedule_mask INTEGER"},
+	}
+	for _, a := range adds {
+		if !existing[a.col] {
+			if _, err := db.Exec(a.def); err != nil {
+				return fmt.Errorf("alter categories add %s: %w", a.col, err)
+			}
+		}
+	}
+	return nil
 }
 
 // migrateRemindersListName adds the reminders_list_name column to projects if
