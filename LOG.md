@@ -4,6 +4,18 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-27 — Document Dailies & Weeklies in README
+
+Added a "Dailies & Weeklies" subsection to `README.md` under "Using it": the
+target syntax table (`30/day`, `/day`, `30/day MTWTF`, `30/week`, `none`),
+positional `MTWTFSS` weekday letters, the progress HUD example, and streak
+behavior (off-day skipping, in-progress period never breaks). Sourced from the
+v1.6.0 LOG entry. Docs-only — no code change, no version bump.
+
+## 2026-05-27 — Add README
+
+Wrote a top-level `README.md`: high-level overview of what jacktasks is (the two binaries, the three ADHD-driven problems it solves), usage instructions (install, session flow, the in-session command table, sync), and a condensed deploy section pointing at `deploy/DEPLOY.md`. Sourced from `PROJECT.md` and the `Makefile`. Docs-only — no code change, no version bump.
+
 ## 2026-05-26 — Read-only web session view on the sync server (v1.7.0)
 
 Adds a browsable list of logged sessions, served by the existing `jacktasks-sync` server on the ThinkCentre. The master DB already holds every session from both Macs, so the view needs no new data plumbing — just a render. No new binary on the Mac (the TUI is unchanged); requires a sync-server redeploy (`make build-sync-linux` → scp → restart). Version still bumped to 1.7.0 to track the feature, even though it lands in the sync binary rather than the TUI.
