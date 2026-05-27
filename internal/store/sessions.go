@@ -169,6 +169,26 @@ func (s *Store) LatestSession(ctx context.Context) (*Session, error) {
 	return &sess, nil
 }
 
+// CountTodaySessions returns the number of sessions whose started_at falls
+// within the calendar day defined by the given time (using its local timezone).
+func (s *Store) CountTodaySessions(ctx context.Context, now time.Time) (int, error) {
+	// Compute midnight boundaries in the same location as now.
+	loc := now.Location()
+	y, m, d := now.Date()
+	dayStart := time.Date(y, m, d, 0, 0, 0, 0, loc).Unix()
+	dayEnd := time.Date(y, m, d+1, 0, 0, 0, 0, loc).Unix()
+
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions WHERE started_at >= ? AND started_at < ?`,
+		dayStart, dayEnd,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count today sessions: %w", err)
+	}
+	return n, nil
+}
+
 func scanSession(r rowScanner) (Session, error) {
 	var sess Session
 	var startedAt, endedAt, createdAt int64

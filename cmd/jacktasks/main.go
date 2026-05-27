@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/j-f-allison/jacktasks/internal/config"
 	"github.com/j-f-allison/jacktasks/internal/paths"
 	"github.com/j-f-allison/jacktasks/internal/reminders"
 	"github.com/j-f-allison/jacktasks/internal/store"
@@ -85,7 +86,17 @@ func runTUI(ctx context.Context) {
 		Token: os.Getenv("JACKTASKS_SYNC_TOKEN"),
 	}
 
-	m := newModel(s, deviceID, dataDir, ctx, remClient, syncCfg)
+	cfgPath, err := paths.ConfigPath()
+	if err != nil {
+		log.Fatalf("config path: %v", err)
+	}
+	appCfg, err := config.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	m := newModel(s, deviceID, dataDir, ctx, remClient, syncCfg, appCfg)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

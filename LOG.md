@@ -4,6 +4,21 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-26 — TOML config foundation + daily_session_target (v1.5.0)
+
+Introduces `~/.config/jacktasks/config.toml` as the user-editable config surface, backed by `github.com/BurntSushi/toml`. New `internal/config/` package: `Config` struct + `Load(path)`. Missing file = fine (defaults everywhere). Parse error = print to stderr and exit non-zero — no silent fallback.
+
+`ConfigPath()` added to `internal/paths/` to locate the file (`$HOME/.config/jacktasks/config.toml`). Config is loaded in `main.go` before the TUI starts and passed into `newModel` as an `appCfg config.Config` argument.
+
+Consumer — `daily_session_target = N`:
+- New `Store.CountTodaySessions(ctx, now)` in the sessions DAL: counts rows whose `started_at` falls within the calendar day of `now` (local timezone), using midnight boundaries computed from `time.Date`.
+- `Model` gains `dailyTarget int` (from config) and `todaySessions int` (DB count, refreshed on startup via `initStartup` and after each session save via `sessionSavedMsg`).
+- A `Sessions today: N/M` dim line appears on both the start screen and the WhatNext screen when `daily_session_target > 0`. When unset/zero, nothing is shown.
+
+5 new tests (4 config: missing, valid, malformed, explicit-zero; 1 store: CountTodaySessions today vs yesterday). 108 tests pass.
+
+---
+
 ## 2026-05-26 — Per-project Reminders list (v1.4.0)
 
 Associates a named Apple Reminders list with each project. During session setup, the category-selection screen shows a second section — "From \<list\>:" — containing incomplete items from the project's list alongside the existing project categories. Selecting a reminder sets `doContextText` and `pendingReminderID`, routing into the normal Do machinery: the reminder title pre-fills the new-category-name input (editable), and the end-of-session dispo prompt offers to mark it complete.

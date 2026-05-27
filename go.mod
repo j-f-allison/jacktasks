@@ -6,6 +6,7 @@ require modernc.org/sqlite v1.50.1
 
 require (
 	github.com/BRO3886/go-eventkit v0.9.0 // indirect
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/bubbles v1.0.0 // indirect

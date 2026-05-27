@@ -210,6 +210,53 @@ func TestGetSession(t *testing.T) {
 	}
 }
 
+func TestCountTodaySessions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	catID, projID := sessionFixtures(t, s)
+
+	now := time.Now()
+	// Two sessions today.
+	for i := 0; i < 2; i++ {
+		_, err := s.CreateSession(ctx, CreateSessionInput{
+			CategoryID:         catID,
+			ProjectID:          projID,
+			PlannedDurationMin: 25,
+			ActualDurationSec:  1500,
+			StartedAt:          now.Add(time.Duration(i) * time.Minute),
+			EndedAt:            now.Add(time.Duration(i)*time.Minute + 25*time.Minute),
+			Status:             SessionCompleted,
+			DeviceID:           "macbook-test",
+		})
+		if err != nil {
+			t.Fatalf("create session %d: %v", i, err)
+		}
+	}
+	// One session yesterday.
+	yesterday := now.Add(-24 * time.Hour)
+	_, err := s.CreateSession(ctx, CreateSessionInput{
+		CategoryID:         catID,
+		ProjectID:          projID,
+		PlannedDurationMin: 25,
+		ActualDurationSec:  1500,
+		StartedAt:          yesterday,
+		EndedAt:            yesterday.Add(25 * time.Minute),
+		Status:             SessionCompleted,
+		DeviceID:           "macbook-test",
+	})
+	if err != nil {
+		t.Fatalf("create yesterday session: %v", err)
+	}
+
+	count, err := s.CountTodaySessions(ctx, now)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("got %d, want 2", count)
+	}
+}
+
 func TestLatestSession(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

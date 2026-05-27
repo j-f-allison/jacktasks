@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/j-f-allison/jacktasks/internal/config"
 	"github.com/j-f-allison/jacktasks/internal/recovery"
 	"github.com/j-f-allison/jacktasks/internal/reminders"
 	"github.com/j-f-allison/jacktasks/internal/session"
@@ -180,14 +181,18 @@ type Model struct {
 	// sync (Phase 6c): config plumbed from env at launch; non-empty URL+Token
 	// enables the "s) Sync now" menu option on the startup screen.
 	syncCfg     syncclient.Config
-	syncing     bool   // true while any sync (manual or auto) is in flight
-	syncManual  bool   // true when the in-flight sync is user-triggered (affects rendering)
-	syncSummary string // last sync result, shown on the start screen
+	syncing     bool      // true while any sync (manual or auto) is in flight
+	syncManual  bool      // true when the in-flight sync is user-triggered (affects rendering)
+	syncSummary string    // last sync result, shown on the start screen
 	lastSyncAt  time.Time // when the last sync attempt completed; zero = never
-	lastSyncOK  bool   // whether the last sync succeeded; only meaningful if !lastSyncAt.IsZero()
+	lastSyncOK  bool      // whether the last sync succeeded; only meaningful if !lastSyncAt.IsZero()
+
+	// Phase 9: TOML config + daily target
+	dailyTarget   int // from config.toml; 0 = no target
+	todaySessions int // count of sessions started today; refreshed on startup and after session save
 }
 
-func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, remClient reminders.Client, syncCfg syncclient.Config) Model {
+func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, remClient reminders.Client, syncCfg syncclient.Config, appCfg config.Config) Model {
 	ti := textinput.New()
 	ti.Focus()
 
@@ -205,19 +210,20 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 	prog.Width = 40
 
 	m := Model{
-		store:     s,
-		deviceID:  deviceID,
-		dataDir:   dataDir,
-		ctx:       ctx,
-		machine:   &session.Machine{},
-		input:     ti,
-		noteArea:  ta,
-		now:       time.Now(),
-		remClient: remClient,
-		sp:        sp,
-		prog:      prog,
-		helpModel: help.New(),
-		syncCfg:   syncCfg,
+		store:       s,
+		deviceID:    deviceID,
+		dataDir:     dataDir,
+		ctx:         ctx,
+		machine:     &session.Machine{},
+		input:       ti,
+		noteArea:    ta,
+		now:         time.Now(),
+		remClient:   remClient,
+		sp:          sp,
+		prog:        prog,
+		helpModel:   help.New(),
+		syncCfg:     syncCfg,
+		dailyTarget: appCfg.DailySessionTarget,
 	}
 
 	// Check for a crash sentinel before anything else. Both reads are local and fast.
@@ -249,6 +255,7 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 // first launch and after the user discards a crash sentinel.
 func (m *Model) initStartup() {
 	m.resume = checkResume(m.ctx, m.store)
+	m.refreshTodaySessions()
 	m.cursor = 0
 	if m.remClient != nil || m.resume != nil {
 		m.extra = uiExtraStart
@@ -257,6 +264,18 @@ func (m *Model) initStartup() {
 		m.extra = uiExtraNone
 		_ = m.machine.BeginSetup()
 		m.input.Placeholder = "choice"
+	}
+}
+
+// refreshTodaySessions updates m.todaySessions from the DB. Errors are
+// silently ignored — a stale count is better than a crash.
+func (m *Model) refreshTodaySessions() {
+	if m.dailyTarget <= 0 {
+		return
+	}
+	n, err := m.store.CountTodaySessions(m.ctx, time.Now())
+	if err == nil {
+		m.todaySessions = n
 	}
 }
 
@@ -413,6 +432,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.input.Reset()
 		m.input.Placeholder = "choice"
+		m.refreshTodaySessions()
 		cmds := []tea.Cmd{m.clearSentinelCmd()}
 		// Kick off a background sync now that the session is on disk. Skip
 		// if another sync is already in flight — the next session-save (or
@@ -1893,6 +1913,11 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 	}
 	fmt.Fprintf(b, "  %s\n\n", renderListItem(m.cursor == cursorIdx, "q) Quit"))
 
+	if m.dailyTarget > 0 {
+		fmt.Fprintf(b, "  %s\n", StyleDim.Render(
+			fmt.Sprintf("Sessions today: %d/%d", m.todaySessions, m.dailyTarget),
+		))
+	}
 	if status := m.syncStatusLine(); status != "" {
 		fmt.Fprintf(b, "  %s\n", status)
 	}
@@ -1901,7 +1926,7 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 			fmt.Fprintf(b, "  %s\n", StyleDim.Render(line))
 		}
 	}
-	if m.syncSummary != "" || m.syncStatusLine() != "" {
+	if m.dailyTarget > 0 || m.syncSummary != "" || m.syncStatusLine() != "" {
 		fmt.Fprintln(b)
 	}
 
@@ -1950,8 +1975,16 @@ func (m Model) renderWhatNext(b *strings.Builder) {
 	}
 	fmt.Fprintln(b)
 
+	if m.dailyTarget > 0 {
+		fmt.Fprintf(b, "  %s\n", StyleDim.Render(
+			fmt.Sprintf("Sessions today: %d/%d", m.todaySessions, m.dailyTarget),
+		))
+	}
 	if status := m.syncStatusLine(); status != "" {
-		fmt.Fprintf(b, "  %s\n\n", status)
+		fmt.Fprintf(b, "  %s\n", status)
+	}
+	if m.dailyTarget > 0 || m.syncStatusLine() != "" {
+		fmt.Fprintln(b)
 	}
 
 	b.WriteString("  ")

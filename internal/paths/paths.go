@@ -34,3 +34,13 @@ func DBPath() (string, error) {
 func DBPathFromDir(dir string) string {
 	return filepath.Join(dir, "jacktasks.db")
 }
+
+// ConfigPath returns the absolute path to the user-editable TOML config file.
+// The file may not exist; callers should treat a missing file as valid (defaults apply).
+func ConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("user home dir: %w", err)
+	}
+	return filepath.Join(home, ".config", "jacktasks", "config.toml"), nil
+}

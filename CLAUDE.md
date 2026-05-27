@@ -4,16 +4,16 @@ Instructions for Claude (chat or Code) when working on this project. Read `PROJE
 
 ## Current handoff state (2026-05-26)
 
-Post-V1 feature development in progress. 103 tests pass. Three new features shipped in rapid succession (see LOG.md for details):
+Post-V1 feature development in progress. All three roadmap phases complete. 108 tests pass.
 - v1.3.0: Cancel session (`cancel` command on Active/Paused)
 - v1.4.0: Per-project Reminders list (schema migration + EventKit generalization + TUI)
-- Phase 9 (TOML + daily_session_target) is next — not yet started.
+- v1.5.0: TOML config foundation + `daily_session_target` consumer (Phase 9)
 
 **Next pickup:**
-- Phase 9 (TOML config foundation + `daily_session_target` consumer). Requires a TOML dep (`github.com/BurntSushi/toml`) — confirm with user before adding.
+- No further phases planned. Ask the user what they'd like next.
 - No known bugs or blockers.
 
-**Do not** add new features beyond the three phases agreed upon without asking.
+**Do not** add new features without asking.
 
 ## Communication style
 
