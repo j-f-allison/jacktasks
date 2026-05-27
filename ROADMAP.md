@@ -10,13 +10,7 @@ Post-V1 candidate features. Not a committed sequence — items are organized by 
 
 These have clear design, small scope, and unlock or enable later work. Each is a single focused session.
 
-### Cancel session
-
-A `cancel` command on Active/Paused that ends the session with no DB record, no resume eligibility, and discards in-flight captures. Crash sentinel is cleared. Returns to the start screen.
-
-Design notes:
-- In-flight captures are dropped intentionally. They live in memory only at this point; "cancel" semantics imply "this didn't happen." If real loss-aversion shows up in trial use, offer a one-line "discard N captures?" confirmation, but don't pre-build it.
-- No schema work. Pure machine-state + TUI change.
+### Cancel session — shipped in v1.3.0 (see Phase 7 in PROJECT.md)
 
 ### Daily HUD: today's totals, session count, intra-day streak
 

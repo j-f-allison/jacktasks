@@ -116,6 +116,48 @@ func TestSetDurationZero(t *testing.T) {
 	}
 }
 
+// --- Cancel ---
+
+func TestCancelFromActive(t *testing.T) {
+	m, now := setupToActive(t, 25)
+	_ = m.AddCapture("a thought", now.Add(5*time.Minute))
+
+	if err := m.Cancel(now.Add(10 * time.Minute)); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if m.State() != StateIdle {
+		t.Errorf("state = %s, want Idle", m.State())
+	}
+	if len(m.Captures()) != 0 {
+		t.Errorf("captures should be discarded, got %d", len(m.Captures()))
+	}
+	if m.SessionID() != "" {
+		t.Errorf("sessionID should be cleared, got %q", m.SessionID())
+	}
+	if m.CategoryID() != "" {
+		t.Errorf("categoryID should be cleared, got %q", m.CategoryID())
+	}
+}
+
+func TestCancelFromPaused(t *testing.T) {
+	m, now := setupToActive(t, 25)
+	_ = m.Pause(now.Add(10 * time.Minute))
+
+	if err := m.Cancel(now.Add(12 * time.Minute)); err != nil {
+		t.Fatalf("Cancel from Paused: %v", err)
+	}
+	if m.State() != StateIdle {
+		t.Errorf("state = %s, want Idle", m.State())
+	}
+}
+
+func TestCancelWrongState(t *testing.T) {
+	m := &Machine{}
+	if err := m.Cancel(epoch); !errors.Is(err, ErrWrongState) {
+		t.Errorf("Cancel from Idle: want ErrWrongState, got %v", err)
+	}
+}
+
 // --- Pause / Resume ---
 
 func TestPauseResume(t *testing.T) {

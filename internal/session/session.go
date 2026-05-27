@@ -259,6 +259,17 @@ func (m *Machine) Extend(minutes int, now time.Time) error {
 	return nil
 }
 
+// Cancel discards the current session without writing a DB record: clears all
+// in-flight fields (including captures) and returns to Idle. Valid from Active
+// or Paused. Caller is responsible for clearing the crash sentinel.
+func (m *Machine) Cancel(now time.Time) error {
+	if m.state != StateActive && m.state != StatePaused {
+		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
+	}
+	*m = Machine{state: StateIdle}
+	return nil
+}
+
 // End transitions from Active or Paused to EndingNotes and records end time
 // and status. If in Paused, the open pause interval is closed first.
 func (m *Machine) End(now time.Time) error {

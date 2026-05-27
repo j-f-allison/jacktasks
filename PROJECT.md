@@ -261,6 +261,64 @@ Then `jacktasks sync` to push/pull. See `deploy/DEPLOY.md` for the full cross-Ma
 
 **Versioning + install path (closed):** SemVer introduced starting at v1.0.0. `VERSION` in `Makefile` is the source of truth; baked into the binary via `-ldflags "-X main.Version=..."`. `cmd/jacktasks/version.go` holds the Go-side var (default matches Makefile). Version displayed on the start screen below the logo. `make install` now defaults to `~/.local/bin` (no sudo required); user adds `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` once.
 
+## Planned post-V1 phases
+
+Three roadmap items promoted to active work, in implementation order. Each is a single focused session; do them one at a time, tests green before moving on. Promote from `ROADMAP.md` per the standing rule: write the phase plan here, append a `LOG.md` entry when done, and bump the version. Current version is v1.2.0; the version numbers below are the *expected* bumps assuming this order holds — adjust if sequencing changes.
+
+### Phase 7 — Cancel session (v1.3.0, no schema)
+
+A `cancel` command on Active/Paused that ends the session with **no DB record**, no resume eligibility, and discards in-flight captures. Smallest of the three; fully self-contained.
+
+Scope:
+- New transition on `internal/session/Machine`: from `StateActive` or `StatePaused` → `StateIdle`. It does *not* set `endedAt`/`status` and does *not* produce a row to persist — distinct from `End`, which routes to `StateEndingNotes` and INSERTs. Add as `Cancel(now)` alongside the existing `End`; mirror the existing state-guard + test pattern in `session_test.go`.
+- The in-memory session value (including `captures[]`) is dropped. Captures live in memory only at this stage, so "cancel" = "this didn't happen." No confirmation prompt for now — add a one-line "discard N captures?" guard only if real loss-aversion surfaces in use.
+- TUI: a `cancel` command on the Active/Paused command line (and a footer hint). On cancel, clear the `active.json` crash sentinel and return to the start screen.
+- Crash sentinel must be cleared so recovery doesn't later offer to resume a cancelled session.
+
+Verification: `go test ./...` green (new session-package tests for the transition + guards), `go run ./cmd/jacktasks` to confirm the command returns cleanly to the start screen and no row was written.
+
+### Phase 8 — Per-project Reminders list (v1.4.0, schema migration)
+
+Each project can be associated with a named Apple Reminders list. When that project is selected at session setup, the category-selection screen shows existing categories *and* incomplete items from the associated list. Picking a reminder reuses the existing Do machinery.
+
+Schema:
+- `projects.reminders_list_name TEXT` — NULL = no associated list. Migration follows the established `migrateArrivedAt` pattern (`PRAGMA table_info` check + `ALTER TABLE projects ADD COLUMN reminders_list_name TEXT`). Add `migrateRemindersListName` in `store.go`, called from `Open` alongside the existing migrations. Wire format: the column joins the `projects` sync row as a nullable string (LWW on `updated_at`, no new sync logic). Update `scanProject`, `PullSince`/`UpsertFromSync` column lists, and the syncproto projects row type.
+
+Reminders client (real new EventKit work — today `reminders.Client` only knows the hardcoded `jacktasks-inbox`):
+- Add `Lists(ctx) ([]string, error)` to enumerate available Reminders lists (for the picker).
+- Add `ListItems(ctx, listName) ([]Reminder, error)` — generalize the body of `ListInbox` (which already uses `ekr.WithList(name)`/`WithCompleted(false)`) to take an arbitrary list name. `ListInbox` can become `ListItems(ctx, InboxListName)`.
+- `Complete(ctx, id)` already works by ID — unchanged.
+- Mirror both new methods in `reminders.Fake` for tests.
+
+UI:
+- **Project selection screen:** inline edit. Cursor highlights a project; press `l` to open a picker showing all lists from `Lists()`, plus a "none" option to clear. Selecting one calls `UpdateProject` to set `reminders_list_name`.
+- **Category selection screen:** when the selected project has a `reminders_list_name`, render two sections under one cursor navigation — existing project categories first, then "From <list name>:" with the list's incomplete reminders.
+- Selecting a reminder behaves exactly like a Do on an inbox item: set `doContextText` = reminder title (pre-fills the new-category-name input), set `pendingReminderID`/`pendingReminderTitle`, drop into the normal category-or-new flow (model.go:1043–1094 / :828–897 machinery is reused as-is). At session end the existing v1.0.2 dispo prompt offers to mark it complete.
+
+Notes:
+- This is the first place reminders appear at the category-selection stage; startup inbox (captured-on-phone) and per-project lists (pre-authored) are now two distinct entry points.
+- No-project sessions don't get this (list is project-scoped). Multiple projects → same list is fine, no constraint.
+- EventKit failures stay non-fatal/logged-to-stderr, same as elsewhere.
+
+Verification: `go test ./...` green (migration test, store round-trip incl. the new column, Fake-backed UI logic), then `go run ./cmd/jacktasks` on a Mac to exercise the real EventKit picker and the category-screen split.
+
+### Phase 9 — TOML config foundation + daily_session_target (v1.5.0, no schema)
+
+Introduce `~/.config/jacktasks/config.toml` (path already declared above as "planned"), and ship it with one real consumer so it's exercised end-to-end rather than dead.
+
+Config loader (new `internal/config/` package):
+- Single-pass load on app start. No hot-reload — restart to apply (this is a TUI, not a daemon).
+- Missing file is fine: defaults everywhere. Do **not** write a default file on first run.
+- Validation: parse errors print to stderr and exit non-zero rather than silently falling back. The user wants to know.
+- Needs a TOML dependency — `github.com/BurntSushi/toml` is the standard choice. **Per CLAUDE.md, confirm the dependency with the user before adding it.**
+
+Consumer — `daily_session_target = N`:
+- Per-device preference, not data — lives in TOML, does **not** sync.
+- The full Daily HUD is *not* in this batch, so surface progress minimally: a single "Sessions today: N/M" line on the start screen and the WhatNext screen. Cheap query — count today's saved sessions (group by day; reuse/extend a sessions DAL query). When the full HUD lands later, this line folds into it.
+- If `daily_session_target` is unset/zero, show nothing (no target → no line).
+
+Verification: `go test ./...` green (config parse/validate/defaults tests, session-count query test), `go run ./cmd/jacktasks` with and without a config file present, and with a deliberately malformed file to confirm the stderr-and-exit behavior.
+
 ## Sync protocol
 
 REST over HTTP, JSON bodies. Server binds to Tailscale interface only. Auth: `Authorization: Bearer <token>` from `JACKTASKS_SYNC_TOKEN` env var.

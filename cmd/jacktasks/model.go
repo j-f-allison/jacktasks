@@ -1015,6 +1015,18 @@ func (m Model) handleActiveCommand(val string) (tea.Model, tea.Cmd) {
 		} else {
 			m.enterEndingNotes()
 		}
+	case "cancel":
+		_ = m.machine.Cancel(now)
+		m.initStartup()
+		m.input.Reset()
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.clearSentinelCmd())
+		if m.extra == uiExtraStart && m.remClient != nil {
+			cmds = append(cmds, m.loadInboxCmd(), m.sp.Tick)
+		} else if m.machine.State() == session.StateSetupProject {
+			cmds = append(cmds, m.loadProjectsCmd())
+		}
+		return m, tea.Batch(cmds...)
 	default:
 		m.errMsg = fmt.Sprintf("unknown command %q", cmd)
 	}
@@ -1421,9 +1433,9 @@ func (m Model) renderFooter() string {
 func (m Model) footerHint() string {
 	switch m.machine.State() {
 	case session.StateActive:
-		return "upn <text> capture  •  ext <n> extend  •  pause  •  end"
+		return "upn <text> capture  •  ext <n> extend  •  pause  •  end  •  cancel"
 	case session.StatePaused:
-		return "upn <text> capture  •  ext <n> extend  •  resume  •  end"
+		return "upn <text> capture  •  ext <n> extend  •  resume  •  end  •  cancel"
 	}
 	if m.width > 0 {
 		m.helpModel.Width = m.width

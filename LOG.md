@@ -4,6 +4,19 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-26 — Cancel session (v1.3.0)
+
+Added a `cancel` command on the Active and Paused screens. Typing `cancel` discards the in-progress session (no DB row written, in-flight captures dropped) and returns to the start screen.
+
+Implementation:
+- `Machine.Cancel(now)` in `internal/session/session.go`: valid from Active or Paused, resets the machine to `StateIdle` via a zero-value struct assignment (same pattern as `NewSession`). Returns `ErrWrongState` from any other state.
+- 3 new tests in `session_test.go`: cancel from Active (verifies captures are discarded and all fields cleared), cancel from Paused, cancel from wrong state.
+- TUI: `cancel` case in `handleActiveCommand` mirrors the crash-sentinel "n" discard path — clears the sentinel, calls `initStartup()`, reloads inbox or projects depending on what `initStartup` resolved. Footer hints on Active and Paused screens updated to include `cancel`.
+
+No schema changes. 73 tests pass.
+
+---
+
 ## 2026-05-25 — Auto-sync on startup and after session save (v1.2.0)
 
 After a few days of real use, "Auto-sync" was removed from the out-of-V1 list and implemented. Two trigger points:
