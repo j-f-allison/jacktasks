@@ -30,28 +30,7 @@ Design notes:
 - All-or-nothing toggle, not per-transition. Add granular control only if a real need surfaces.
 - Failures are non-fatal and logged to stderr; the session continues. Same pattern as EventKit failure handling.
 
-### Per-project Reminders list
-
-Each project can be associated with a named Apple Reminders list. When that project is selected at session setup, the category-selection screen shows existing categories *and* items from the associated list. Picking a reminder routes into the existing Do machinery — prefills the category name, sets `pendingReminderID` so the end-of-session dispo prompt offers to mark it complete.
-
-Use case: lay out a week of class assignments (or any project's structured to-do items) in a Reminders list, then select them at session start without retyping.
-
-Schema:
-- `projects.reminders_list_name TEXT` — NULL = no associated list. Migration: ALTER TABLE ADD COLUMN.
-
-UI:
-- Inline edit on the project selection screen. Cursor highlights a project; press `l` to open a picker showing all available Reminders lists (via EventKit). Selecting one sets it; a "none" option clears it.
-- Category selection screen, when the project has an associated list, shows two sections: existing project categories first, then "From \<list name\>:" with reminders from the list. Both sections are part of the same cursor navigation.
-- Selecting a reminder behaves identically to selecting an inbox item via Do: prefills the *new-category-name input* with the reminder text (editable; ignored if you pick an existing category instead), sets `pendingReminderID`, drops into the normal category-or-new flow. So "Read Ch. 7" → "Reading" category is one cursor-up + Enter; "Read Ch. 7" as a fresh category requires actively typing/accepting the prefill.
-- At session end, the existing v1.0.2 dispo prompt offers to mark the reminder complete.
-
-Design notes:
-- This is the *first* place reminders appear at the category-selection stage (current inbox only appears on startup). Worth being explicit that we now have two distinct entry points: startup inbox (captured-on-phone) and per-project lists (pre-authored task lists).
-- Leverages existing infrastructure: EventKit list-by-name, `pendingReminderID` machinery, dispo prompt, `doContextText` prefill. The new work is one schema column, one inline-edit UX on project selection, and the section split on the category screen.
-- Multiple projects pointing to the same Reminders list is fine; no constraint needed.
-- No-project sessions don't have this feature (list is project-scoped). Fine.
-- Syncs naturally via existing projects sync (LWW on `updated_at`). The list *name* is what syncs; each Mac resolves it locally against its own EventKit-visible lists.
-- Does *not* obsolete the Enhanced Reminders integration entry in Larger — that's about smarter startup inbox queries (overdue/today filters), which is a different UX. But it narrows what that entry is for: structured per-project task lists move here.
+### Per-project Reminders list — shipped in v1.4.0 (see Phase 8 in PROJECT.md)
 
 ### TOML config foundation
 

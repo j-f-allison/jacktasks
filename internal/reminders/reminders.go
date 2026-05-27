@@ -18,8 +18,12 @@ type Reminder struct {
 // Client is the interface the TUI uses to interact with Apple Reminders.
 // Implementations: eventkitClient (real) and Fake (tests).
 type Client interface {
+	// Lists returns the names of all available Reminders lists.
+	Lists(ctx context.Context) ([]string, error)
 	// ListInbox returns incomplete reminders from jacktasks-inbox.
 	ListInbox(ctx context.Context) ([]Reminder, error)
+	// ListItems returns incomplete reminders from the named list.
+	ListItems(ctx context.Context, listName string) ([]Reminder, error)
 	// Add creates a new reminder in jacktasks-inbox and returns its ID.
 	Add(ctx context.Context, text string) (string, error)
 	// Complete marks the reminder with the given ID as done.

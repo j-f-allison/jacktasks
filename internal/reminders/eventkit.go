@@ -22,14 +22,30 @@ func NewEventKit() (Client, error) {
 	return &eventkitClient{c: c}, nil
 }
 
-func (e *eventkitClient) ListInbox(_ context.Context) ([]Reminder, error) {
+func (e *eventkitClient) Lists(_ context.Context) ([]string, error) {
+	lists, err := e.c.Lists()
+	if err != nil {
+		return nil, fmt.Errorf("list reminders lists: %w", err)
+	}
+	out := make([]string, len(lists))
+	for i, l := range lists {
+		out[i] = l.Title
+	}
+	return out, nil
+}
+
+func (e *eventkitClient) ListInbox(ctx context.Context) ([]Reminder, error) {
+	return e.ListItems(ctx, InboxListName)
+}
+
+func (e *eventkitClient) ListItems(_ context.Context, listName string) ([]Reminder, error) {
 	completed := false
 	items, err := e.c.Reminders(
-		ekr.WithList(InboxListName),
+		ekr.WithList(listName),
 		ekr.WithCompleted(completed),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list inbox: %w", err)
+		return nil, fmt.Errorf("list items from %q: %w", listName, err)
 	}
 	out := make([]Reminder, len(items))
 	for i, r := range items {

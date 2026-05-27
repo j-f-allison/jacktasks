@@ -2,15 +2,18 @@
 
 Instructions for Claude (chat or Code) when working on this project. Read `PROJECT.md` first for context and `LOG.md` for the running history of decisions.
 
-## Current handoff state (2026-05-24)
+## Current handoff state (2026-05-26)
 
-V1 is fully deployed and in daily use on both Macs. 70 tests pass. Sync is working between MacBook, Mac Mini, and the ThinkCentre server. Several post-deploy bugs were fixed and the UI was polished — see LOG.md for details.
+Post-V1 feature development in progress. 103 tests pass. Three new features shipped in rapid succession (see LOG.md for details):
+- v1.3.0: Cancel session (`cancel` command on Active/Paused)
+- v1.4.0: Per-project Reminders list (schema migration + EventKit generalization + TUI)
+- Phase 9 (TOML + daily_session_target) is next — not yet started.
 
 **Next pickup:**
-- Run a few days of real use before considering anything from the "out of V1" list.
+- Phase 9 (TOML config foundation + `daily_session_target` consumer). Requires a TOML dep (`github.com/BurntSushi/toml`) — confirm with user before adding.
 - No known bugs or blockers.
 
-**Do not** start new features until the user has completed a trial period with the deployed system.
+**Do not** add new features beyond the three phases agreed upon without asking.
 
 ## Communication style
 

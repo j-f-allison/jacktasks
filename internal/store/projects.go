@@ -12,12 +12,13 @@ import (
 
 // Project is a top-level grouping for work.
 type Project struct {
-	ID        string
-	Name      string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	DeletedAt *time.Time
-	Archived  bool
+	ID                string
+	Name              string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	DeletedAt         *time.Time
+	Archived          bool
+	RemindersListName string // empty = no associated Reminders list
 }
 
 // CreateProject inserts a new project and returns it fully populated.
@@ -44,7 +45,7 @@ func (s *Store) CreateProject(ctx context.Context, name string) (*Project, error
 // sorted by name case-insensitively.
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, created_at, updated_at, deleted_at, archived
+		`SELECT id, name, created_at, updated_at, deleted_at, archived, reminders_list_name
 		 FROM projects
 		 WHERE deleted_at IS NULL AND archived = 0
 		 ORDER BY name COLLATE NOCASE`,
@@ -69,7 +70,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 // and archived rows. Returns ErrNotFound if no row matches.
 func (s *Store) GetProject(ctx context.Context, id string) (*Project, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, created_at, updated_at, deleted_at, archived
+		`SELECT id, name, created_at, updated_at, deleted_at, archived, reminders_list_name
 		 FROM projects WHERE id = ?`,
 		id,
 	)
@@ -103,13 +104,39 @@ func (s *Store) UpdateProject(ctx context.Context, id, name string) error {
 	return nil
 }
 
+// SetProjectRemindersList associates a Reminders list name with the given
+// project. An empty listName clears the association (stored as NULL).
+// Bumps updated_at so the change syncs. Returns ErrNotFound if no row matches.
+func (s *Store) SetProjectRemindersList(ctx context.Context, id, listName string) error {
+	var arg any
+	if listName != "" {
+		arg = listName
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET reminders_list_name = ?, updated_at = ? WHERE id = ?`,
+		arg, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("set reminders list: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func scanProject(r rowScanner) (Project, error) {
 	var p Project
 	var createdAt, updatedAt int64
 	var deletedAt sql.NullInt64
 	var archived int
+	var remindersListName sql.NullString
 
-	if err := r.Scan(&p.ID, &p.Name, &createdAt, &updatedAt, &deletedAt, &archived); err != nil {
+	if err := r.Scan(&p.ID, &p.Name, &createdAt, &updatedAt, &deletedAt, &archived, &remindersListName); err != nil {
 		return p, err
 	}
 	p.CreatedAt = time.Unix(createdAt, 0)
@@ -119,5 +146,6 @@ func scanProject(r rowScanner) (Project, error) {
 		p.DeletedAt = &t
 	}
 	p.Archived = archived != 0
+	p.RemindersListName = remindersListName.String
 	return p, nil
 }

@@ -12,7 +12,7 @@ import (
 // schema.sql.
 var tableColumns = map[string][]string{
 	"projects": {
-		"id", "name", "created_at", "updated_at", "deleted_at", "archived",
+		"id", "name", "created_at", "updated_at", "deleted_at", "archived", "reminders_list_name",
 	},
 	"categories": {
 		"id", "name", "project_id", "created_at", "updated_at", "deleted_at", "archived",
@@ -159,17 +159,18 @@ func (s *Store) PullSinceArrived(ctx context.Context, table string, since int64)
 // LWW check passes so that other clients pulling by arrived_at see the update.
 func upsertProject(ctx context.Context, db *sql.DB, row map[string]any, arrivedAt int64) error {
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO projects (id, name, created_at, updated_at, deleted_at, archived, arrived_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO projects (id, name, created_at, updated_at, deleted_at, archived, reminders_list_name, arrived_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-		  name       = excluded.name,
-		  updated_at = excluded.updated_at,
-		  deleted_at = excluded.deleted_at,
-		  archived   = excluded.archived,
-		  arrived_at = excluded.arrived_at
+		  name                = excluded.name,
+		  updated_at          = excluded.updated_at,
+		  deleted_at          = excluded.deleted_at,
+		  archived            = excluded.archived,
+		  reminders_list_name = excluded.reminders_list_name,
+		  arrived_at          = excluded.arrived_at
 		WHERE excluded.updated_at > projects.updated_at`,
 		row["id"], row["name"], row["created_at"], row["updated_at"],
-		row["deleted_at"], row["archived"], arrivedAt,
+		row["deleted_at"], row["archived"], row["reminders_list_name"], arrivedAt,
 	)
 	return err
 }

@@ -4,6 +4,23 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-26 — Per-project Reminders list (v1.4.0)
+
+Associates a named Apple Reminders list with each project. During session setup, the category-selection screen shows a second section — "From \<list\>:" — containing incomplete items from the project's list alongside the existing project categories. Selecting a reminder sets `doContextText` and `pendingReminderID`, routing into the normal Do machinery: the reminder title pre-fills the new-category-name input (editable), and the end-of-session dispo prompt offers to mark it complete.
+
+Schema: `projects.reminders_list_name TEXT` (NULL = no list). Added via `migrateRemindersListName` in `store.go`, following the established `ALTER TABLE ADD COLUMN` pattern. The column joins the `projects` sync wire row (LWW on `updated_at`); no new sync logic was needed.
+
+Reminders client: `Lists(ctx) ([]string, error)` and `ListItems(ctx, listName) ([]Reminder, error)` added to the `Client` interface and implemented in both `eventkitClient` (real, via `c.Lists()` and `c.Reminders(WithList(name), WithCompleted(false))`) and `Fake` (new `AllLists`, `ItemsByList` fields). `ListInbox` on the real client simplified to delegate to `ListItems(ctx, InboxListName)`.
+
+TUI:
+- Project selection screen: projects with an associated list show a dim `[ListName]` tag. Pressing `l` on a highlighted project opens a `uiExtraRemListPicker` overlay showing all available lists (loaded async) plus `0) None (clear)`. Selection calls `SetProjectRemindersList` and updates the in-place project entry.
+- Category selection screen: when the selected project has a `reminders_list_name` and items are available, a dim `From <list>:` section header separates the reminder items from the existing categories. Items show as `• Title` and are cursor-navigable. `listLen()` and `cursorVal()` updated to span both sections; `handleCategoryInput` handles `rem:N` selections.
+- Footer hint on the project screen updated to show `l set reminders list` when EventKit is available.
+
+103 tests pass (30 new: 3 store, 5 reminders, rest indirectly exercised).
+
+---
+
 ## 2026-05-26 — Cancel session (v1.3.0)
 
 Added a `cancel` command on the Active and Paused screens. Typing `cancel` discards the in-progress session (no DB row written, in-flight captures dropped) and returns to the start screen.

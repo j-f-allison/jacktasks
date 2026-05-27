@@ -59,7 +59,47 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("migrate arrived_at: %w", err)
 	}
 
+	if err := migrateRemindersListName(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate projects.reminders_list_name: %w", err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// migrateRemindersListName adds the reminders_list_name column to projects if
+// absent. NULL = no associated Reminders list. Safe to call on a DB that
+// already has the column (no-op).
+func migrateRemindersListName(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(projects)")
+	if err != nil {
+		return fmt.Errorf("table_info(projects): %w", err)
+	}
+	defer rows.Close()
+
+	exists := false
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan table_info(projects): %w", err)
+		}
+		if name == "reminders_list_name" {
+			exists = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("table_info rows: %w", err)
+	}
+
+	if !exists {
+		if _, err := db.Exec(`ALTER TABLE projects ADD COLUMN reminders_list_name TEXT`); err != nil {
+			return fmt.Errorf("alter projects: %w", err)
+		}
+	}
+	return nil
 }
 
 // migrateCapturesUpdatedAt adds the updated_at column to captures if it does

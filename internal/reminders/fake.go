@@ -10,14 +10,42 @@ import (
 // Fake is an in-memory Client for use in tests.
 // Pre-load Inbox to simulate existing reminders.
 type Fake struct {
-	Inbox     []Reminder // incomplete reminders visible to ListInbox
-	AddErr    error      // if non-nil, Add returns this error
-	CompleteErr error    // if non-nil, Complete returns this error
+	Inbox        []Reminder            // incomplete reminders visible to ListInbox
+	AddErr       error                 // if non-nil, Add returns this error
+	CompleteErr  error                 // if non-nil, Complete returns this error
+	AllLists     []string              // list names returned by Lists()
+	ListsErr     error                 // if non-nil, Lists() returns this error
+	ItemsByList  map[string][]Reminder // per-list items for ListItems(); inbox served from Inbox
+	ListItemsErr error                 // if non-nil, ListItems() returns this error
+}
+
+func (f *Fake) Lists(_ context.Context) ([]string, error) {
+	if f.ListsErr != nil {
+		return nil, f.ListsErr
+	}
+	out := make([]string, len(f.AllLists))
+	copy(out, f.AllLists)
+	return out, nil
 }
 
 func (f *Fake) ListInbox(_ context.Context) ([]Reminder, error) {
 	out := make([]Reminder, len(f.Inbox))
 	copy(out, f.Inbox)
+	return out, nil
+}
+
+func (f *Fake) ListItems(_ context.Context, listName string) ([]Reminder, error) {
+	if f.ListItemsErr != nil {
+		return nil, f.ListItemsErr
+	}
+	if listName == InboxListName {
+		out := make([]Reminder, len(f.Inbox))
+		copy(out, f.Inbox)
+		return out, nil
+	}
+	items := f.ItemsByList[listName]
+	out := make([]Reminder, len(items))
+	copy(out, items)
 	return out, nil
 }
 

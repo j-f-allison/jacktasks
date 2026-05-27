@@ -59,18 +59,29 @@ type syncDoneMsg struct {
 	manual  bool // true if user-triggered via "s) Sync now"; false for auto-sync
 }
 
+type remListsLoadedMsg struct {
+	lists []string
+	err   error
+}
+
+type projRemindersLoadedMsg struct {
+	items []reminders.Reminder
+	err   error
+}
+
 // ── UI sub-states ─────────────────────────────────────────────────────────────
 
 // uiExtra covers UI modes that don't map 1:1 to session.Machine states.
 type uiExtra int
 
 const (
-	uiExtraNone        uiExtra = iota
-	uiExtraNewName             // entering a new category or project name
-	uiExtraContinueDur         // entering duration for "continue session" (from WhatNext)
-	uiExtraStart               // startup screen: inbox + resume + new session
-	uiExtraRecover             // crash-recovery offer shown before the start screen
-	uiExtraReminderDispo       // after end notes: confirm whether to mark the originating reminder complete
+	uiExtraNone          uiExtra = iota
+	uiExtraNewName               // entering a new category or project name
+	uiExtraContinueDur           // entering duration for "continue session" (from WhatNext)
+	uiExtraStart                 // startup screen: inbox + resume + new session
+	uiExtraRecover               // crash-recovery offer shown before the start screen
+	uiExtraReminderDispo         // after end notes: confirm whether to mark the originating reminder complete
+	uiExtraRemListPicker         // picker shown when user presses 'l' on a project to set its Reminders list
 )
 
 // ── resume candidate ──────────────────────────────────────────────────────────
@@ -102,6 +113,14 @@ type Model struct {
 	remClient   reminders.Client
 	inboxItems  []reminders.Reminder
 	inboxLoaded bool
+
+	// per-project reminders: loaded when a project with RemindersListName is selected
+	selectedProjRemindersList string           // RemindersListName of the currently selected project
+	projReminderItems         []reminders.Reminder // incomplete items from that list
+
+	// list picker overlay ('l' on project screen)
+	remListsEditIdx int      // index into m.projects of the project being edited
+	remLists        []string // all available Reminders list names (nil = not yet loaded)
 
 	// loaded for setup screens
 	categories []store.Category
@@ -353,6 +372,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case remListsLoadedMsg:
+		if msg.err != nil {
+			fmt.Fprintf(os.Stderr, "load reminder lists: %v\n", msg.err)
+		}
+		m.remLists = msg.lists
+		return m, nil
+
+	case projRemindersLoadedMsg:
+		if msg.err != nil {
+			fmt.Fprintf(os.Stderr, "load project reminders: %v\n", msg.err)
+		} else {
+			m.projReminderItems = msg.items
+		}
+		return m, nil
+
 	case categoriesLoadedMsg:
 		if msg.err != nil {
 			return m, func() tea.Msg { return fatalMsg{msg.err} }
@@ -472,6 +506,20 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.cursor++
 				}
 				return m, nil
+			case "l":
+				// 'l' on the project selection screen opens the Reminders list picker
+				// for the currently highlighted project (cursor 1..N).
+				if state == session.StateSetupProject && m.extra == uiExtraNone &&
+					m.remClient != nil &&
+					m.cursor >= 1 && m.cursor <= len(m.projects) {
+					m.remListsEditIdx = m.cursor - 1
+					m.remLists = nil
+					m.extra = uiExtraRemListPicker
+					m.cursor = 0
+					m.input.Reset()
+					m.input.Placeholder = "choice"
+					return m, m.loadRemListsCmd()
+				}
 			}
 		}
 	}
@@ -517,6 +565,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.extra == uiExtraReminderDispo {
 		return m.handleReminderDisposition(val)
+	}
+
+	if m.extra == uiExtraRemListPicker {
+		return m.handleRemListPicker(val)
 	}
 
 	switch m.machine.State() {
@@ -637,10 +689,12 @@ func (m Model) listLen() int {
 			n++ // s) Sync now
 		}
 		return n
+	case m.extra == uiExtraRemListPicker:
+		return len(m.remLists) + 1 // 0) none + lists
 	case state == session.StateSetupProject && m.extra == uiExtraNone:
 		return len(m.projects) + 2 // 0) no-project + projects + n) new
 	case state == session.StateSetupCategory && m.extra == uiExtraNone && m.machine.ProjectID() != "":
-		return len(m.categories) + 1 // categories + n) new
+		return len(m.categories) + len(m.projReminderItems) + 1 // categories + reminders + n) new
 	case state == session.StateWhatNext && m.extra == uiExtraNone:
 		return 4 // actions 1–4
 	}
@@ -685,9 +739,22 @@ func (m Model) cursorVal() string {
 		}
 		return "n"
 
+	case m.extra == uiExtraRemListPicker:
+		if m.cursor == 0 {
+			return "0"
+		}
+		if m.cursor <= len(m.remLists) {
+			return strconv.Itoa(m.cursor)
+		}
+		return "0"
+
 	case state == session.StateSetupCategory && m.extra == uiExtraNone && m.machine.ProjectID() != "":
 		if m.cursor < len(m.categories) {
 			return strconv.Itoa(m.cursor + 1)
+		}
+		remOffset := m.cursor - len(m.categories)
+		if remOffset < len(m.projReminderItems) {
+			return "rem:" + strconv.Itoa(remOffset+1)
 		}
 		return "n"
 
@@ -882,6 +949,24 @@ func (m Model) handleCategoryInput(val string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Reminder selected from the project-reminders section.
+	if strings.HasPrefix(val, "rem:") {
+		n, err := strconv.Atoi(strings.TrimPrefix(val, "rem:"))
+		if err != nil || n < 1 || n > len(m.projReminderItems) {
+			m.errMsg = "invalid choice"
+			m.input.Reset()
+			return m, nil
+		}
+		rem := m.projReminderItems[n-1]
+		m.doContextText = rem.Title
+		m.pendingReminderID = rem.ID
+		m.pendingReminderTitle = rem.Title
+		m.projReminderItems = nil // clear section; context shown via doContextText
+		m.cursor = 0
+		m.input.Reset()
+		return m, nil
+	}
+
 	n, err := strconv.Atoi(val)
 	if err != nil || n < 1 || n > len(m.categories) {
 		m.errMsg = "invalid choice"
@@ -893,6 +978,32 @@ func (m Model) handleCategoryInput(val string) (tea.Model, tea.Cmd) {
 	_ = m.machine.SetCategory(cat.ID, m.now)
 	m.input.Reset()
 	m.input.Placeholder = "minutes"
+	return m, nil
+}
+
+func (m Model) handleRemListPicker(val string) (tea.Model, tea.Cmd) {
+	proj := m.projects[m.remListsEditIdx]
+	var listName string
+	if val == "0" {
+		// clear — listName stays ""
+	} else if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= len(m.remLists) {
+		listName = m.remLists[n-1]
+	} else {
+		m.errMsg = "enter 0 to clear, or 1-" + strconv.Itoa(len(m.remLists)) + " to choose"
+		m.input.Reset()
+		return m, nil
+	}
+	if err := m.store.SetProjectRemindersList(m.ctx, proj.ID, listName); err != nil {
+		m.errMsg = err.Error()
+		m.input.Reset()
+		return m, nil
+	}
+	m.projects[m.remListsEditIdx].RemindersListName = listName
+	m.extra = uiExtraNone
+	m.remLists = nil
+	m.cursor = m.remListsEditIdx + 1 // return cursor to the edited project
+	m.input.Reset()
+	m.input.Placeholder = "choice"
 	return m, nil
 }
 
@@ -910,6 +1021,8 @@ func (m Model) handleProjectInput(val string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selectedProjName = proj.Name
+		m.selectedProjRemindersList = ""
+		m.projReminderItems = nil
 		_ = m.machine.SetProject(proj.ID, m.now)
 		m.extra = uiExtraNone
 		m.cursor = 0
@@ -928,6 +1041,8 @@ func (m Model) handleProjectInput(val string) (tea.Model, tea.Cmd) {
 	// "0" means no project — go to category as free-text input.
 	if val == "0" {
 		m.selectedProjName = ""
+		m.selectedProjRemindersList = ""
+		m.projReminderItems = nil
 		_ = m.machine.SetProject("", m.now)
 		m.input.Reset()
 		m.input.Placeholder = "category name"
@@ -942,11 +1057,18 @@ func (m Model) handleProjectInput(val string) (tea.Model, tea.Cmd) {
 	}
 	proj := m.projects[n-1]
 	m.selectedProjName = proj.Name
+	m.selectedProjRemindersList = proj.RemindersListName
+	m.projReminderItems = nil
 	_ = m.machine.SetProject(proj.ID, m.now)
 	m.cursor = 0
 	m.input.Reset()
 	m.input.Placeholder = "choice"
-	return m, m.loadCategoriesCmd()
+	var cmds []tea.Cmd
+	cmds = append(cmds, m.loadCategoriesCmd())
+	if proj.RemindersListName != "" && m.remClient != nil {
+		cmds = append(cmds, m.loadProjRemindersCmd(proj.RemindersListName))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m Model) handleDurationInput(val string) (tea.Model, tea.Cmd) {
@@ -1266,6 +1388,24 @@ func (m Model) loadInboxCmd() tea.Cmd {
 	}
 }
 
+func (m Model) loadRemListsCmd() tea.Cmd {
+	rc := m.remClient
+	ctx := m.ctx
+	return func() tea.Msg {
+		lists, err := rc.Lists(ctx)
+		return remListsLoadedMsg{lists: lists, err: err}
+	}
+}
+
+func (m Model) loadProjRemindersCmd(listName string) tea.Cmd {
+	rc := m.remClient
+	ctx := m.ctx
+	return func() tea.Msg {
+		items, err := rc.ListItems(ctx, listName)
+		return projRemindersLoadedMsg{items: items, err: err}
+	}
+}
+
 func (m Model) clearCaptureCmd(captureID string) tea.Cmd {
 	s, ctx := m.store, m.ctx
 	return func() tea.Msg {
@@ -1437,6 +1577,10 @@ func (m Model) footerHint() string {
 	case session.StatePaused:
 		return "upn <text> capture  •  ext <n> extend  •  resume  •  end  •  cancel"
 	}
+	// Project selection: show 'l' hint when reminders are available.
+	if m.machine.State() == session.StateSetupProject && m.extra == uiExtraNone && m.remClient != nil {
+		return "↑↓ / j/k navigate  •  l set reminders list  •  enter select  •  q quit"
+	}
 	if m.width > 0 {
 		m.helpModel.Width = m.width
 	}
@@ -1453,6 +1597,9 @@ func (m Model) screenName() string {
 	}
 	if m.extra == uiExtraContinueDur {
 		return "Duration"
+	}
+	if m.extra == uiExtraRemListPicker {
+		return "Set Reminders List"
 	}
 	switch m.machine.State() {
 	case session.StateSetupProject:
@@ -1540,13 +1687,36 @@ func (m Model) renderContent(b *strings.Builder) {
 		if m.doContextText != "" {
 			fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("Doing: "+m.doContextText))
 		}
-		if m.extra == uiExtraNewName {
+		if m.extra == uiExtraRemListPicker {
+			proj := m.projects[m.remListsEditIdx]
+			fmt.Fprintf(b, "  Set Reminders list for %s:\n\n", StyleAccent.Render(proj.Name))
+			if m.remLists == nil {
+				fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("Loading lists…"))
+			} else {
+				items := []string{"0) None (clear)"}
+				for i, l := range m.remLists {
+					label := fmt.Sprintf("%d) %s", i+1, l)
+					if l == proj.RemindersListName {
+						label += StyleDim.Render("  ← current")
+					}
+					items = append(items, label)
+				}
+				for i, item := range items {
+					fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == i, item))
+				}
+				fmt.Fprintln(b)
+			}
+		} else if m.extra == uiExtraNewName {
 			fmt.Fprintf(b, "  New project name:\n\n")
 		} else {
 			fmt.Fprintf(b, "  Select a project:\n\n")
 			items := []string{"0) — no project"}
 			for i, p := range m.projects {
-				items = append(items, fmt.Sprintf("%d) %s", i+1, p.Name))
+				label := fmt.Sprintf("%d) %s", i+1, p.Name)
+				if p.RemindersListName != "" {
+					label += StyleDim.Render("  ["+p.RemindersListName+"]")
+				}
+				items = append(items, label)
 			}
 			items = append(items, "n) New project")
 			for i, item := range items {
@@ -1572,14 +1742,23 @@ func (m Model) renderContent(b *strings.Builder) {
 					fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("(press Enter to use the text above, or type a new name)"))
 				}
 			} else {
-				items := []string{}
+				// Existing project categories.
 				for i, c := range m.categories {
-					items = append(items, fmt.Sprintf("%d) %s", i+1, c.Name))
+					label := fmt.Sprintf("%d) %s", i+1, c.Name)
+					fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == i, label))
 				}
-				items = append(items, "n) New category")
-				for i, item := range items {
-					fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == i, item))
+				// Per-project Reminders section (when the project has an associated list).
+				if len(m.projReminderItems) > 0 {
+					fmt.Fprintf(b, "\n  %s\n", StyleDim.Render("From "+m.selectedProjRemindersList+":"))
+					for i, r := range m.projReminderItems {
+						idx := len(m.categories) + i
+						fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == idx, "• "+r.Title))
+					}
+					fmt.Fprintln(b)
 				}
+				// New category.
+				newIdx := len(m.categories) + len(m.projReminderItems)
+				fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == newIdx, "n) New category"))
 				fmt.Fprintln(b)
 			}
 		}

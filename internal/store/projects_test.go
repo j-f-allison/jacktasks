@@ -76,3 +76,69 @@ func TestGetProject(t *testing.T) {
 		t.Errorf("got err %v, want ErrNotFound", err)
 	}
 }
+
+func TestSetProjectRemindersList(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	p, err := s.CreateProject(ctx, "thesis")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if p.RemindersListName != "" {
+		t.Errorf("new project RemindersListName = %q, want empty", p.RemindersListName)
+	}
+
+	// Set a list name.
+	if err := s.SetProjectRemindersList(ctx, p.ID, "Thesis Tasks"); err != nil {
+		t.Fatalf("SetProjectRemindersList set: %v", err)
+	}
+	got, err := s.GetProject(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("get after set: %v", err)
+	}
+	if got.RemindersListName != "Thesis Tasks" {
+		t.Errorf("RemindersListName = %q, want %q", got.RemindersListName, "Thesis Tasks")
+	}
+
+	// Clear the list name.
+	if err := s.SetProjectRemindersList(ctx, p.ID, ""); err != nil {
+		t.Fatalf("SetProjectRemindersList clear: %v", err)
+	}
+	got, err = s.GetProject(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("get after clear: %v", err)
+	}
+	if got.RemindersListName != "" {
+		t.Errorf("RemindersListName after clear = %q, want empty", got.RemindersListName)
+	}
+
+	// Not found.
+	if err := s.SetProjectRemindersList(ctx, "no-such-id", "X"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestListProjectsIncludesRemindersListName(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	p, err := s.CreateProject(ctx, "class")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.SetProjectRemindersList(ctx, p.ID, "Assignments"); err != nil {
+		t.Fatalf("set reminders list: %v", err)
+	}
+
+	list, err := s.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("got %d projects, want 1", len(list))
+	}
+	if list[0].RemindersListName != "Assignments" {
+		t.Errorf("RemindersListName = %q, want Assignments", list[0].RemindersListName)
+	}
+}
