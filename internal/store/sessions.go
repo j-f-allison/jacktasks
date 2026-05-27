@@ -271,6 +271,23 @@ func (s *Store) SumCategorySecondsBetween(ctx context.Context, categoryID string
 	return n, nil
 }
 
+// CountCategorySessionsBetween returns the number of sessions for the given
+// category whose started_at falls in [start, end). Used for session-count
+// target checks (a session of any length counts; cancelled sessions write no
+// row and so don't count).
+func (s *Store) CountCategorySessionsBetween(ctx context.Context, categoryID string, start, end int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions
+		 WHERE category_id = ? AND started_at >= ? AND started_at < ?`,
+		categoryID, start, end,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count category sessions: %w", err)
+	}
+	return n, nil
+}
+
 // CategoryActiveBetween reports whether any session for the given category
 // started within [start, end). Used for presence-only target checks.
 func (s *Store) CategoryActiveBetween(ctx context.Context, categoryID string, start, end int64) (bool, error) {

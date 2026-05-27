@@ -102,15 +102,23 @@ func weeklyStreak(ctx context.Context, s *Store, cat Category, now time.Time) (i
 
 // periodMet reports whether the category's target was met within [start, end).
 func periodMet(ctx context.Context, s *Store, cat Category, start, end int64) (bool, error) {
-	if cat.TargetMinutes == nil {
+	switch {
+	case cat.TargetSessions != nil:
+		n, err := s.CountCategorySessionsBetween(ctx, cat.ID, start, end)
+		if err != nil {
+			return false, err
+		}
+		return n >= *cat.TargetSessions, nil
+	case cat.TargetMinutes != nil:
+		secs, err := s.SumCategorySecondsBetween(ctx, cat.ID, start, end)
+		if err != nil {
+			return false, err
+		}
+		return secs >= (*cat.TargetMinutes)*60, nil
+	default:
 		// Presence-only: any session counts.
 		return s.CategoryActiveBetween(ctx, cat.ID, start, end)
 	}
-	secs, err := s.SumCategorySecondsBetween(ctx, cat.ID, start, end)
-	if err != nil {
-		return false, err
-	}
-	return secs >= (*cat.TargetMinutes)*60, nil
 }
 
 // StartOfWeekMonday returns the Monday 00:00:00 of the ISO week containing t.

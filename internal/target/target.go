@@ -22,7 +22,7 @@ const (
 	BitSat = 1 << 5
 	BitSun = 1 << 6
 
-	MaskWeekdays = BitMon | BitTue | BitWed | BitThu | BitFri // 0b0011111 = 31
+	MaskWeekdays = BitMon | BitTue | BitWed | BitThu | BitFri                   // 0b0011111 = 31
 	MaskEveryDay = BitMon | BitTue | BitWed | BitThu | BitFri | BitSat | BitSun // 127
 )
 
@@ -33,23 +33,28 @@ const (
 //	"none" or ""         → clear (all nil / "")
 //	"30/day"             → 30 min/day, every day
 //	"30/day MTWTF"       → 30 min/day, weekdays only
+//	"3x/day"             → 3 sessions/day, every day
+//	"3x/day MTWTF"       → 3 sessions/day, weekdays only
 //	"/day"               → presence-only, every day
 //	"/day MWF"           → presence-only, Mon/Wed/Fri
 //	"30/week"            → 30 min/week
+//	"2x/week"            → 2 sessions/week
 //	"/week"              → presence-only weekly
 //
+// A bare number is minutes; a number with an "x" suffix is a session count.
+// minutes and sessions are mutually exclusive (the syntax can't express both).
 // Weekday tokens use letters M T W T F S S (Mon..Sun); duplicate entries are
 // OR-ed. A weekday token on /week is rejected.
-func Parse(s string) (minutes *int, period string, mask *int, err error) {
+func Parse(s string) (minutes *int, sessions *int, period string, mask *int, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.EqualFold(s, "none") {
-		return nil, "", nil, nil
+		return nil, nil, "", nil, nil
 	}
 
 	// Split on whitespace: first token is <n?>/period, optional second is weekday string.
 	parts := strings.Fields(s)
 	if len(parts) > 2 {
-		return nil, "", nil, fmt.Errorf("too many tokens; expected \"<n>/day|week [MTWTFSS]\"")
+		return nil, nil, "", nil, fmt.Errorf("too many tokens; expected \"<n>/day|week [MTWTFSS]\"")
 	}
 
 	main := strings.ToLower(parts[0])
@@ -61,7 +66,7 @@ func Parse(s string) (minutes *int, period string, mask *int, err error) {
 	// Parse <n?>/period.
 	slashIdx := strings.LastIndex(main, "/")
 	if slashIdx < 0 {
-		return nil, "", nil, fmt.Errorf("missing '/'; use e.g. \"30/day\" or \"/week\"")
+		return nil, nil, "", nil, fmt.Errorf("missing '/'; use e.g. \"30/day\", \"3x/day\", or \"/week\"")
 	}
 
 	numPart := main[:slashIdx]
@@ -70,15 +75,24 @@ func Parse(s string) (minutes *int, period string, mask *int, err error) {
 	switch perPart {
 	case PeriodDay, PeriodWeek:
 	default:
-		return nil, "", nil, fmt.Errorf("unknown period %q; use \"day\" or \"week\"", perPart)
+		return nil, nil, "", nil, fmt.Errorf("unknown period %q; use \"day\" or \"week\"", perPart)
 	}
 
 	if numPart != "" {
-		n, parseErr := strconv.Atoi(numPart)
-		if parseErr != nil || n <= 0 {
-			return nil, "", nil, fmt.Errorf("minutes must be a positive integer, got %q", numPart)
+		if strings.HasSuffix(numPart, "x") {
+			countPart := numPart[:len(numPart)-1]
+			n, parseErr := strconv.Atoi(countPart)
+			if parseErr != nil || n <= 0 {
+				return nil, nil, "", nil, fmt.Errorf("session count must be a positive integer, got %q", countPart)
+			}
+			sessions = &n
+		} else {
+			n, parseErr := strconv.Atoi(numPart)
+			if parseErr != nil || n <= 0 {
+				return nil, nil, "", nil, fmt.Errorf("minutes must be a positive integer, got %q", numPart)
+			}
+			minutes = &n
 		}
-		minutes = &n
 	}
 
 	period = perPart
@@ -86,32 +100,39 @@ func Parse(s string) (minutes *int, period string, mask *int, err error) {
 	// Weekday token only allowed on day targets.
 	if weekdayToken != "" {
 		if period != PeriodDay {
-			return nil, "", nil, fmt.Errorf("weekday schedule only applies to daily targets")
+			return nil, nil, "", nil, fmt.Errorf("weekday schedule only applies to daily targets")
 		}
 		m, maskErr := parseWeekdays(weekdayToken)
 		if maskErr != nil {
-			return nil, "", nil, maskErr
+			return nil, nil, "", nil, maskErr
 		}
 		mask = &m
 	}
 
-	return minutes, period, mask, nil
+	return minutes, sessions, period, mask, nil
 }
 
 // Format returns a human-readable description of a target, e.g.
-// "30 min/day, weekdays" or "presence/week" or "" when no target is set.
-// Intended for category-list annotations and confirmation echoes.
-func Format(minutes *int, period string, mask *int) string {
+// "30 min/day, weekdays", "3 sessions/day", "presence/week", or "" when no
+// target is set. Intended for category-list annotations and confirmation echoes.
+func Format(minutes *int, sessions *int, period string, mask *int) string {
 	if period == "" {
 		return ""
 	}
 
 	var parts []string
 
-	// Minute goal or presence.
-	if minutes != nil {
+	// Session count, minute goal, or presence — mutually exclusive.
+	switch {
+	case sessions != nil:
+		unit := "sessions"
+		if *sessions == 1 {
+			unit = "session"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s/%s", *sessions, unit, period))
+	case minutes != nil:
 		parts = append(parts, fmt.Sprintf("%d min/%s", *minutes, period))
-	} else {
+	default:
 		parts = append(parts, fmt.Sprintf("presence/%s", period))
 	}
 

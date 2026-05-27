@@ -72,9 +72,24 @@ type projRemindersLoadedMsg struct {
 }
 
 type categoryProgressMsg struct {
-	periodSec int  // actual_duration_sec summed for the current period
-	streak    int  // consecutive periods met
-	err       error
+	periodSec   int // actual_duration_sec summed for the current period
+	periodCount int // sessions logged in the current period (session-count targets)
+	streak      int // consecutive periods met
+	err         error
+}
+
+// dailyEntry is one targeted category's progress, shown in the start-screen
+// Dailies/Weeklies panel.
+type dailyEntry struct {
+	cat         store.Category
+	periodSec   int
+	periodCount int
+	streak      int
+}
+
+type dailiesLoadedMsg struct {
+	entries []dailyEntry
+	err     error
 }
 
 // ── UI sub-states ─────────────────────────────────────────────────────────────
@@ -124,7 +139,7 @@ type Model struct {
 	inboxLoaded bool
 
 	// per-project reminders: loaded when a project with RemindersListName is selected
-	selectedProjRemindersList string           // RemindersListName of the currently selected project
+	selectedProjRemindersList string               // RemindersListName of the currently selected project
 	projReminderItems         []reminders.Reminder // incomplete items from that list
 
 	// list picker overlay ('l' on project screen)
@@ -135,8 +150,9 @@ type Model struct {
 	targetEditIdx int // index into m.categories of the category being edited
 
 	// HUD progress for the active session's category
-	catPeriodSec int // total actual seconds in the current period
-	catStreak    int // consecutive periods met
+	catPeriodSec   int // total actual seconds in the current period
+	catPeriodCount int // sessions logged in the current period (session-count targets)
+	catStreak      int // consecutive periods met
 
 	// loaded for setup screens
 	categories []store.Category
@@ -168,8 +184,12 @@ type Model struct {
 	// multi-line word-wrapped input for end-of-session notes
 	noteArea textarea.Model
 
-	// updated by tick; used for countdown rendering
+	// updated by tick; used for countdown rendering. Carries m.loc so that
+	// day/week bucketing for Dailies/Weeklies uses the configured timezone.
 	now time.Time
+
+	// display/bucketing timezone (from config.toml; time.Local if unset)
+	loc *time.Location
 
 	// when the 5-min break ends
 	breakEnd time.Time
@@ -185,13 +205,13 @@ type Model struct {
 	fatalErr error
 
 	// Phase 5.5: polish components
-	cursor       int             // keyboard cursor for list screens
-	sp           spinner.Model   // for async-op indicators
-	prog         progress.Model  // for timer progress bar
-	helpModel    help.Model      // for footer key hints
-	showFullHelp bool            // toggled by '?'
+	cursor        int            // keyboard cursor for list screens
+	sp            spinner.Model  // for async-op indicators
+	prog          progress.Model // for timer progress bar
+	helpModel     help.Model     // for footer key hints
+	showFullHelp  bool           // toggled by '?'
 	savingSession bool           // true while session DB write is in flight
-	flashOn       bool            // toggled by tick to flash the end-notes banner
+	flashOn       bool           // toggled by tick to flash the end-notes banner
 
 	// sync (Phase 6c): config plumbed from env at launch; non-empty URL+Token
 	// enables the "s) Sync now" menu option on the startup screen.
@@ -205,6 +225,11 @@ type Model struct {
 	// Phase 9: TOML config + daily target
 	dailyTarget   int // from config.toml; 0 = no target
 	todaySessions int // count of sessions started today; refreshed on startup and after session save
+
+	// start-screen Dailies/Weeklies panel: progress for every targeted category,
+	// loaded asynchronously on startup.
+	dailies       []dailyEntry
+	dailiesLoaded bool
 }
 
 func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, remClient reminders.Client, syncCfg syncclient.Config, appCfg config.Config) Model {
@@ -224,6 +249,11 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 	prog := progress.New(progress.WithDefaultGradient())
 	prog.Width = 40
 
+	loc := appCfg.Location
+	if loc == nil {
+		loc = time.Local
+	}
+
 	m := Model{
 		store:       s,
 		deviceID:    deviceID,
@@ -232,7 +262,8 @@ func newModel(s *store.Store, deviceID, dataDir string, ctx context.Context, rem
 		machine:     &session.Machine{},
 		input:       ti,
 		noteArea:    ta,
-		now:         time.Now(),
+		loc:         loc,
+		now:         time.Now().In(loc),
 		remClient:   remClient,
 		sp:          sp,
 		prog:        prog,
@@ -288,7 +319,7 @@ func (m *Model) refreshTodaySessions() {
 	if m.dailyTarget <= 0 {
 		return
 	}
-	n, err := m.store.CountTodaySessions(m.ctx, time.Now())
+	n, err := m.store.CountTodaySessions(m.ctx, time.Now().In(m.loc))
 	if err == nil {
 		m.todaySessions = n
 	}
@@ -337,6 +368,9 @@ func (m Model) Init() tea.Cmd {
 	if m.remClient != nil && m.extra == uiExtraStart {
 		cmds = append(cmds, m.loadInboxCmd(), m.sp.Tick)
 	}
+	if m.extra == uiExtraStart {
+		cmds = append(cmds, m.loadDailiesCmd())
+	}
 	// Fire a background sync on startup. Fire-and-forget — the UI never waits
 	// on it and the menu/inbox keep rendering normally.
 	if m.syncConfigured() {
@@ -372,7 +406,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		m.now = time.Time(msg)
+		m.now = time.Time(msg).In(m.loc)
 		machState := m.machine.State()
 
 		var cmds []tea.Cmd
@@ -501,7 +535,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case categoryProgressMsg:
 		if msg.err == nil {
 			m.catPeriodSec = msg.periodSec
+			m.catPeriodCount = msg.periodCount
 			m.catStreak = msg.streak
+		}
+		return m, nil
+
+	case dailiesLoadedMsg:
+		m.dailiesLoaded = true
+		if msg.err == nil {
+			m.dailies = msg.entries
 		}
 		return m, nil
 
@@ -585,8 +627,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					cat := m.categories[m.targetEditIdx]
 					m.extra = uiExtraTargetEdit
 					m.input.Reset()
-					m.input.SetValue(target.Format(cat.TargetMinutes, cat.TargetPeriod, cat.ScheduleMask))
-					m.input.Placeholder = "e.g. 30/day MTWTF  or  /week  or  none"
+					m.input.SetValue(target.Format(cat.TargetMinutes, cat.TargetSessions, cat.TargetPeriod, cat.ScheduleMask))
+					m.input.Placeholder = "e.g. 30/day MTWTF  or  3x/day  or  /week  or  none"
 					return m, nil
 				}
 			}
@@ -1081,18 +1123,19 @@ func (m Model) handleRemListPicker(val string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleTargetEdit(val string) (tea.Model, tea.Cmd) {
-	mins, period, mask, err := target.Parse(val)
+	mins, sessions, period, mask, err := target.Parse(val)
 	if err != nil {
 		m.errMsg = err.Error()
 		return m, nil
 	}
 	cat := m.categories[m.targetEditIdx]
-	if err := m.store.SetCategoryTarget(m.ctx, cat.ID, mins, period, mask); err != nil {
+	if err := m.store.SetCategoryTarget(m.ctx, cat.ID, mins, sessions, period, mask); err != nil {
 		m.errMsg = err.Error()
 		return m, nil
 	}
 	// Update the in-memory copy.
 	m.categories[m.targetEditIdx].TargetMinutes = mins
+	m.categories[m.targetEditIdx].TargetSessions = sessions
 	m.categories[m.targetEditIdx].TargetPeriod = period
 	m.categories[m.targetEditIdx].ScheduleMask = mask
 	m.extra = uiExtraNone
@@ -1537,28 +1580,66 @@ func (m Model) loadCategoryProgressCmd(cat store.Category) tea.Cmd {
 	ctx := m.ctx
 	now := m.now
 	return func() tea.Msg {
-		var periodSec int
-		var err error
-
-		if cat.TargetPeriod == target.PeriodDay {
-			loc := now.Location()
-			y, mo, d := now.Date()
-			dayStart := time.Date(y, mo, d, 0, 0, 0, 0, loc).Unix()
-			dayEnd := time.Date(y, mo, d+1, 0, 0, 0, 0, loc).Unix()
-			periodSec, err = s.SumCategorySecondsBetween(ctx, cat.ID, dayStart, dayEnd)
-		} else {
-			// Weekly
-			loc := now.Location()
-			weekStart := store.StartOfWeekMonday(now, loc)
-			weekEnd := weekStart.AddDate(0, 0, 7)
-			periodSec, err = s.SumCategorySecondsBetween(ctx, cat.ID, weekStart.Unix(), weekEnd.Unix())
-		}
+		periodSec, periodCount, err := periodProgress(ctx, s, cat, now)
 		if err != nil {
 			return categoryProgressMsg{err: err}
 		}
-
 		streak, err := store.CategoryStreak(ctx, s, cat, now)
-		return categoryProgressMsg{periodSec: periodSec, streak: streak, err: err}
+		return categoryProgressMsg{periodSec: periodSec, periodCount: periodCount, streak: streak, err: err}
+	}
+}
+
+// periodBounds returns [start, end) Unix bounds for a category's current period
+// (today for daily targets, this week for weekly).
+func periodBounds(cat store.Category, now time.Time) (int64, int64) {
+	loc := now.Location()
+	if cat.TargetPeriod == target.PeriodDay {
+		y, mo, d := now.Date()
+		start := time.Date(y, mo, d, 0, 0, 0, 0, loc).Unix()
+		end := time.Date(y, mo, d+1, 0, 0, 0, 0, loc).Unix()
+		return start, end
+	}
+	weekStart := store.StartOfWeekMonday(now, loc)
+	return weekStart.Unix(), weekStart.AddDate(0, 0, 7).Unix()
+}
+
+// periodProgress returns the metric a category is tracked by for its current
+// period: session count for session-count targets, otherwise accumulated
+// seconds (used for minute and presence-only targets). The unused value is 0.
+func periodProgress(ctx context.Context, s *store.Store, cat store.Category, now time.Time) (periodSec, periodCount int, err error) {
+	start, end := periodBounds(cat, now)
+	if cat.TargetSessions != nil {
+		periodCount, err = s.CountCategorySessionsBetween(ctx, cat.ID, start, end)
+		return 0, periodCount, err
+	}
+	periodSec, err = s.SumCategorySecondsBetween(ctx, cat.ID, start, end)
+	return periodSec, 0, err
+}
+
+// loadDailiesCmd fetches progress + streak for every targeted category, for the
+// start-screen Dailies/Weeklies panel.
+func (m Model) loadDailiesCmd() tea.Cmd {
+	s := m.store
+	ctx := m.ctx
+	now := m.now
+	return func() tea.Msg {
+		cats, err := s.ListCategoriesWithTarget(ctx)
+		if err != nil {
+			return dailiesLoadedMsg{err: err}
+		}
+		entries := make([]dailyEntry, 0, len(cats))
+		for _, cat := range cats {
+			periodSec, periodCount, err := periodProgress(ctx, s, cat, now)
+			if err != nil {
+				return dailiesLoadedMsg{err: err}
+			}
+			streak, err := store.CategoryStreak(ctx, s, cat, now)
+			if err != nil {
+				return dailiesLoadedMsg{err: err}
+			}
+			entries = append(entries, dailyEntry{cat: cat, periodSec: periodSec, periodCount: periodCount, streak: streak})
+		}
+		return dailiesLoadedMsg{entries: entries}
 	}
 }
 
@@ -1880,7 +1961,7 @@ func (m Model) renderContent(b *strings.Builder) {
 			for i, p := range m.projects {
 				label := fmt.Sprintf("%d) %s", i+1, p.Name)
 				if p.RemindersListName != "" {
-					label += StyleDim.Render("  ["+p.RemindersListName+"]")
+					label += StyleDim.Render("  [" + p.RemindersListName + "]")
 				}
 				items = append(items, label)
 			}
@@ -1905,7 +1986,7 @@ func (m Model) renderContent(b *strings.Builder) {
 			if m.extra == uiExtraTargetEdit {
 				cat := m.categories[m.targetEditIdx]
 				fmt.Fprintf(b, "  Set target for %s:\n\n", StyleAccent.Render(cat.Name))
-				fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("e.g. 30/day MTWTF  •  /week  •  30/week  •  none"))
+				fmt.Fprintf(b, "  %s\n\n", StyleDim.Render("e.g. 30/day MTWTF  •  3x/day  •  /week  •  30/week  •  none"))
 			} else if m.extra == uiExtraNewName {
 				fmt.Fprintf(b, "  New category name:\n\n")
 				if m.doContextText != "" {
@@ -1915,8 +1996,8 @@ func (m Model) renderContent(b *strings.Builder) {
 				// Existing project categories.
 				for i, c := range m.categories {
 					label := fmt.Sprintf("%d) %s", i+1, c.Name)
-					if ann := target.Format(c.TargetMinutes, c.TargetPeriod, c.ScheduleMask); ann != "" {
-						label += StyleDim.Render("  ("+ann+")")
+					if ann := target.Format(c.TargetMinutes, c.TargetSessions, c.TargetPeriod, c.ScheduleMask); ann != "" {
+						label += StyleDim.Render("  (" + ann + ")")
 					}
 					fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == i, label))
 				}
@@ -2045,32 +2126,55 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 		return
 	}
 
+	// Build the menu column (inbox + actions + status) separately so it can be
+	// joined side-by-side with the Dailies/Weeklies panel.
+	var menu strings.Builder
 	cursorIdx := 0
 
 	if len(m.inboxItems) > 0 {
-		fmt.Fprintf(b, "  %s\n\n", StyleHeader.Render("Inbox"))
+		fmt.Fprintf(&menu, "%s\n\n", StyleHeader.Render("Inbox"))
 		for _, item := range m.inboxItems {
-			fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == cursorIdx,
+			fmt.Fprintf(&menu, "%s\n", renderListItem(m.cursor == cursorIdx,
 				fmt.Sprintf("%d) %s", cursorIdx+1, item.Title)))
 			cursorIdx++
 		}
-		fmt.Fprintln(b)
+		fmt.Fprintln(&menu)
 	}
 
 	if m.resume != nil {
 		ri := m.resume
-		fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == cursorIdx,
+		fmt.Fprintf(&menu, "%s\n", renderListItem(m.cursor == cursorIdx,
 			fmt.Sprintf("r) Resume %s / %s (%d min remaining)",
 				projectLabel(ri.projectName), ri.categoryName, ri.remaining)))
 		cursorIdx++
 	}
-	fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == cursorIdx, "n) New session"))
+	fmt.Fprintf(&menu, "%s\n", renderListItem(m.cursor == cursorIdx, "n) New session"))
 	cursorIdx++
 	if m.syncConfigured() {
-		fmt.Fprintf(b, "  %s\n", renderListItem(m.cursor == cursorIdx, "s) Sync now"))
+		fmt.Fprintf(&menu, "%s\n", renderListItem(m.cursor == cursorIdx, "s) Sync now"))
 		cursorIdx++
 	}
-	fmt.Fprintf(b, "  %s\n\n", renderListItem(m.cursor == cursorIdx, "q) Quit"))
+	fmt.Fprintf(&menu, "%s\n", renderListItem(m.cursor == cursorIdx, "q) Quit"))
+
+	// Join the menu with the Dailies/Weeklies panel. On narrow terminals (or
+	// when there are no targeted categories) the panel stacks below instead.
+	panel := m.renderDailiesPanel()
+	left := strings.TrimRight(menu.String(), "\n")
+	if panel != "" && m.width >= 72 {
+		joined := lipgloss.JoinHorizontal(lipgloss.Top,
+			left, "    ", panel)
+		writeIndented(b, joined)
+		b.WriteString("\n\n")
+	} else {
+		writeIndented(b, left)
+		b.WriteString("\n")
+		if panel != "" {
+			b.WriteByte('\n')
+			writeIndented(b, panel)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
 
 	if m.dailyTarget > 0 {
 		fmt.Fprintf(b, "  %s\n", StyleDim.Render(
@@ -2092,6 +2196,18 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 	b.WriteString("  ")
 	b.WriteString(m.input.View())
 	writeErr(b, m.errMsg)
+}
+
+// writeIndented writes a (possibly multi-line) block to b with each line
+// prefixed by the standard two-space screen margin.
+func writeIndented(b *strings.Builder, block string) {
+	for i, line := range strings.Split(block, "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("  ")
+		b.WriteString(line)
+	}
 }
 
 // renderWhatNext renders the WhatNext screen including captures and actions.
@@ -2190,32 +2306,7 @@ func (m Model) categoryProgressLine(cat store.Category) string {
 	if !cat.HasTarget() {
 		return ""
 	}
-
-	var progress string
-	if cat.TargetPeriod == target.PeriodDay {
-		if cat.TargetMinutes != nil {
-			doneMins := m.catPeriodSec / 60
-			progress = fmt.Sprintf("%s: %d/%d min today", cat.Name, doneMins, *cat.TargetMinutes)
-		} else {
-			if m.catPeriodSec > 0 {
-				progress = fmt.Sprintf("%s: done today", cat.Name)
-			} else {
-				progress = fmt.Sprintf("%s: not yet today", cat.Name)
-			}
-		}
-	} else {
-		if cat.TargetMinutes != nil {
-			doneMins := m.catPeriodSec / 60
-			progress = fmt.Sprintf("%s: %d/%d min this week", cat.Name, doneMins, *cat.TargetMinutes)
-		} else {
-			if m.catPeriodSec > 0 {
-				progress = fmt.Sprintf("%s: done this week", cat.Name)
-			} else {
-				progress = fmt.Sprintf("%s: not yet this week", cat.Name)
-			}
-		}
-	}
-
+	progress := progressText(cat, m.catPeriodSec, m.catPeriodCount)
 	if m.catStreak > 0 {
 		unit := "days"
 		if cat.TargetPeriod == target.PeriodWeek {
@@ -2223,8 +2314,58 @@ func (m Model) categoryProgressLine(cat store.Category) string {
 		}
 		progress += fmt.Sprintf(" · 🔥 %d-%s streak", m.catStreak, unit)
 	}
-
 	return progress
+}
+
+// progressText returns the "Name: 12/30 min today" portion (no streak) for a
+// targeted category. Session-count targets read "Name: 2/3 today"; presence-only
+// targets read "Name: done today" / "Name: not yet today". Shared by the
+// in-session HUD and the start-screen Dailies/Weeklies panel.
+func progressText(cat store.Category, periodSec, periodCount int) string {
+	when := "today"
+	if cat.TargetPeriod == target.PeriodWeek {
+		when = "this week"
+	}
+	switch {
+	case cat.TargetSessions != nil:
+		return fmt.Sprintf("%s: %d/%d %s", cat.Name, periodCount, *cat.TargetSessions, when)
+	case cat.TargetMinutes != nil:
+		return fmt.Sprintf("%s: %d/%d min %s", cat.Name, periodSec/60, *cat.TargetMinutes, when)
+	case periodSec > 0:
+		return fmt.Sprintf("%s: done %s", cat.Name, when)
+	default:
+		return fmt.Sprintf("%s: not yet %s", cat.Name, when)
+	}
+}
+
+// dailyPanelLine formats one targeted category for the start-screen panel, with
+// a compact streak suffix ("· 🔥 4d" / "· 🔥 2w").
+func dailyPanelLine(e dailyEntry) string {
+	line := progressText(e.cat, e.periodSec, e.periodCount)
+	if e.streak > 0 {
+		unit := "d"
+		if e.cat.TargetPeriod == target.PeriodWeek {
+			unit = "w"
+		}
+		line += fmt.Sprintf(" · 🔥 %d%s", e.streak, unit)
+	}
+	return line
+}
+
+// renderDailiesPanel builds the right-hand Dailies/Weeklies panel for the start
+// screen. Returns "" if there are no targeted categories.
+func (m Model) renderDailiesPanel() string {
+	if !m.dailiesLoaded || len(m.dailies) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(StyleHeader.Render("Dailies / Weeklies"))
+	b.WriteByte('\n')
+	for _, e := range m.dailies {
+		b.WriteByte('\n')
+		b.WriteString(StyleDim.Render(dailyPanelLine(e)))
+	}
+	return b.String()
 }
 
 func formatDuration(d time.Duration) string {

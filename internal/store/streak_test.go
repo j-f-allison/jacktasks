@@ -37,7 +37,7 @@ func categoryWithTarget(t *testing.T, s *Store, projID string, mins *int, period
 		t.Fatalf("create category: %v", err)
 	}
 	if period != "" {
-		if err := s.SetCategoryTarget(ctx, cat.ID, mins, period, mask); err != nil {
+		if err := s.SetCategoryTarget(ctx, cat.ID, mins, nil, period, mask); err != nil {
 			t.Fatalf("set target: %v", err)
 		}
 		cat, err = s.GetCategory(ctx, cat.ID)
@@ -286,5 +286,74 @@ func TestWeeklyStreakPresenceOnly(t *testing.T) {
 	n, err := CategoryStreak(ctx, s, cat, now)
 	if err != nil || n != 1 {
 		t.Errorf("weekly presence: got %d err %v, want 1", n, err)
+	}
+}
+
+func TestCountCategorySessionsBetween(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	catID, projID := sessionFixtures(t, s)
+
+	now := time.Date(2024, 1, 10, 12, 0, 0, 0, time.Local)
+	dayStart := time.Date(2024, 1, 10, 0, 0, 0, 0, time.Local).Unix()
+	dayEnd := time.Date(2024, 1, 11, 0, 0, 0, 0, time.Local).Unix()
+
+	// Three sessions today (any length), one yesterday.
+	seedSession(t, s, catID, projID, now.Add(-2*time.Hour), 60)
+	seedSession(t, s, catID, projID, now.Add(-time.Hour), 1)
+	seedSession(t, s, catID, projID, now, 3600)
+	seedSession(t, s, catID, projID, now.AddDate(0, 0, -1), 1800)
+
+	n, err := s.CountCategorySessionsBetween(ctx, catID, dayStart, dayEnd)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("got %d sessions today, want 3", n)
+	}
+}
+
+func TestDailyStreakSessionCount(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	proj, _ := s.CreateProject(ctx, "P")
+
+	// 2 sessions/day, every day.
+	cat, err := s.CreateCategory(ctx, "Standup", proj.ID)
+	if err != nil {
+		t.Fatalf("create category: %v", err)
+	}
+	sessions := 2
+	if err := s.SetCategoryTarget(ctx, cat.ID, nil, &sessions, target.PeriodDay, nil); err != nil {
+		t.Fatalf("set session target: %v", err)
+	}
+	got, err := s.GetCategory(ctx, cat.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	now := time.Date(2024, 1, 10, 12, 0, 0, 0, time.Local)
+
+	// Yesterday: 2 sessions (met). Day before: 2 sessions (met). 3 days ago: only 1 (missed).
+	for _, dayOffset := range []int{-1, -2} {
+		day := now.AddDate(0, 0, dayOffset)
+		seedSession(t, s, cat.ID, proj.ID, day.Add(time.Hour), 300)
+		seedSession(t, s, cat.ID, proj.ID, day.Add(2*time.Hour), 300)
+	}
+	seedSession(t, s, cat.ID, proj.ID, now.AddDate(0, 0, -3).Add(time.Hour), 300) // only 1
+
+	n, err := CategoryStreak(ctx, s, *got, now)
+	if err != nil || n != 2 {
+		t.Errorf("session-count streak: got %d err %v, want 2", n, err)
+	}
+
+	// One session yesterday should not meet a 2/day target.
+	cat2, _ := s.CreateCategory(ctx, "Once", proj.ID)
+	_ = s.SetCategoryTarget(ctx, cat2.ID, nil, &sessions, target.PeriodDay, nil)
+	got2, _ := s.GetCategory(ctx, cat2.ID)
+	seedSession(t, s, cat2.ID, proj.ID, now.AddDate(0, 0, -1).Add(time.Hour), 300)
+	n, err = CategoryStreak(ctx, s, *got2, now)
+	if err != nil || n != 0 {
+		t.Errorf("under-target: got %d err %v, want 0", n, err)
 	}
 }

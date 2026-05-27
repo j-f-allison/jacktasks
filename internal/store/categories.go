@@ -12,16 +12,17 @@ import (
 
 // Category is a sub-label scoped to a project (or project-less when ProjectID is empty).
 type Category struct {
-	ID            string
-	Name          string
-	ProjectID     string // empty when NULL (no-project category)
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	DeletedAt     *time.Time
-	Archived      bool
-	TargetMinutes *int   // nil = no minute goal (presence-only or no target)
-	TargetPeriod  string // "" = no recurrence; "day" or "week"
-	ScheduleMask  *int   // nil = every day (only meaningful when TargetPeriod = "day")
+	ID             string
+	Name           string
+	ProjectID      string // empty when NULL (no-project category)
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	DeletedAt      *time.Time
+	Archived       bool
+	TargetMinutes  *int   // nil = no minute goal (presence-only, session-count, or no target)
+	TargetSessions *int   // nil = no session-count goal; set = N sessions per period
+	TargetPeriod   string // "" = no recurrence; "day" or "week"
+	ScheduleMask   *int   // nil = every day (only meaningful when TargetPeriod = "day")
 }
 
 // HasTarget reports whether this category has a recurring target set.
@@ -65,7 +66,7 @@ func (s *Store) ListCategoriesByProject(ctx context.Context, projectID string) (
 	if projectID == "" {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
-			        target_minutes, target_period, schedule_mask
+			        target_minutes, target_period, schedule_mask, target_sessions
 			 FROM categories
 			 WHERE project_id IS NULL AND deleted_at IS NULL AND archived = 0
 			 ORDER BY name COLLATE NOCASE`,
@@ -73,7 +74,7 @@ func (s *Store) ListCategoriesByProject(ctx context.Context, projectID string) (
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
-			        target_minutes, target_period, schedule_mask
+			        target_minutes, target_period, schedule_mask, target_sessions
 			 FROM categories
 			 WHERE project_id = ? AND deleted_at IS NULL AND archived = 0
 			 ORDER BY name COLLATE NOCASE`,
@@ -96,11 +97,39 @@ func (s *Store) ListCategoriesByProject(ctx context.Context, projectID string) (
 	return out, rows.Err()
 }
 
+// ListCategoriesWithTarget returns all live categories (any project) that carry
+// a recurring target, sorted by name case-insensitively. Used by the start
+// screen to render the Dailies/Weeklies panel.
+func (s *Store) ListCategoriesWithTarget(ctx context.Context) ([]Category, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
+		        target_minutes, target_period, schedule_mask, target_sessions
+		 FROM categories
+		 WHERE target_period IS NOT NULL AND target_period != ''
+		   AND deleted_at IS NULL AND archived = 0
+		 ORDER BY name COLLATE NOCASE`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query categories with target: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Category
+	for rows.Next() {
+		c, err := scanCategory(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // GetCategory returns the category with the given id. Returns ErrNotFound if no row matches.
 func (s *Store) GetCategory(ctx context.Context, id string) (*Category, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
-		        target_minutes, target_period, schedule_mask
+		        target_minutes, target_period, schedule_mask, target_sessions
 		 FROM categories WHERE id = ?`,
 		id,
 	)
@@ -119,7 +148,7 @@ func (s *Store) GetCategory(ctx context.Context, id string) (*Category, error) {
 func (s *Store) CreateOrGetCategoryByName(ctx context.Context, name, projectID string) (*Category, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, name, project_id, created_at, updated_at, deleted_at, archived,
-		        target_minutes, target_period, schedule_mask
+		        target_minutes, target_period, schedule_mask, target_sessions
 		 FROM categories WHERE name = ? AND project_id IS NULL AND deleted_at IS NULL`,
 		name,
 	)
@@ -147,10 +176,11 @@ func scanCategory(r rowScanner) (Category, error) {
 	var targetMinutes sql.NullInt64
 	var targetPeriod sql.NullString
 	var scheduleMask sql.NullInt64
+	var targetSessions sql.NullInt64
 
 	if err := r.Scan(
 		&c.ID, &c.Name, &projectID, &createdAt, &updatedAt, &deletedAt, &archived,
-		&targetMinutes, &targetPeriod, &scheduleMask,
+		&targetMinutes, &targetPeriod, &scheduleMask, &targetSessions,
 	); err != nil {
 		return c, err
 	}
@@ -175,14 +205,18 @@ func scanCategory(r rowScanner) (Category, error) {
 		n := int(scheduleMask.Int64)
 		c.ScheduleMask = &n
 	}
+	if targetSessions.Valid {
+		n := int(targetSessions.Int64)
+		c.TargetSessions = &n
+	}
 	return c, nil
 }
 
 // SetCategoryTarget updates the recurring target for a category and bumps
 // updated_at so the change propagates via sync (LWW). Pass period="" / nil
 // pointers to clear. Returns ErrNotFound if no row matches.
-func (s *Store) SetCategoryTarget(ctx context.Context, id string, minutes *int, period string, mask *int) error {
-	var minArg, maskArg any
+func (s *Store) SetCategoryTarget(ctx context.Context, id string, minutes *int, sessions *int, period string, mask *int) error {
+	var minArg, maskArg, sessArg any
 	if minutes != nil {
 		minArg = *minutes
 	}
@@ -193,12 +227,15 @@ func (s *Store) SetCategoryTarget(ctx context.Context, id string, minutes *int, 
 	if mask != nil {
 		maskArg = *mask
 	}
+	if sessions != nil {
+		sessArg = *sessions
+	}
 
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE categories
-		 SET target_minutes = ?, target_period = ?, schedule_mask = ?, updated_at = ?
+		 SET target_minutes = ?, target_period = ?, schedule_mask = ?, target_sessions = ?, updated_at = ?
 		 WHERE id = ?`,
-		minArg, perArg, maskArg, time.Now().Unix(), id,
+		minArg, perArg, maskArg, sessArg, time.Now().Unix(), id,
 	)
 	if err != nil {
 		return fmt.Errorf("set category target: %w", err)

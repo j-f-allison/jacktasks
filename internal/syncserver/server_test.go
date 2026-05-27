@@ -27,7 +27,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	srv := httptest.NewServer(syncserver.NewMux(st, testToken))
+	srv := httptest.NewServer(syncserver.NewMux(st, testToken, time.Local))
 	t.Cleanup(func() {
 		srv.Close()
 		st.Close()

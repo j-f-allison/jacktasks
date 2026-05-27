@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadMissing(t *testing.T) {
@@ -14,6 +15,57 @@ func TestLoadMissing(t *testing.T) {
 	}
 	if cfg.DailySessionTarget != 0 {
 		t.Errorf("default DailySessionTarget should be 0, got %d", cfg.DailySessionTarget)
+	}
+	if cfg.Location != time.Local {
+		t.Errorf("default Location should be time.Local, got %v", cfg.Location)
+	}
+}
+
+func TestLoadTimezone(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("timezone = \"America/Denver\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Timezone != "America/Denver" {
+		t.Errorf("want timezone America/Denver, got %q", cfg.Timezone)
+	}
+	want, _ := time.LoadLocation("America/Denver")
+	if cfg.Location.String() != want.String() {
+		t.Errorf("want Location %v, got %v", want, cfg.Location)
+	}
+}
+
+func TestLoadInvalidTimezone(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("timezone = \"Mars/Olympus\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid timezone, got nil")
+	}
+}
+
+func TestLoadEmptyTimezoneDefaultsLocal(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("daily_session_target = 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Location != time.Local {
+		t.Errorf("empty timezone should default to time.Local, got %v", cfg.Location)
 	}
 }
 

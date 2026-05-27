@@ -1,6 +1,6 @@
 .PHONY: build test vet check install build-sync-linux
 
-VERSION := 1.7.0
+VERSION := 1.8.0
 
 ## build — compile all binaries for the current platform (macOS)
 build:

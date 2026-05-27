@@ -110,15 +110,21 @@ syntax:
 | Input          | Meaning                                                        |
 |----------------|----------------------------------------------------------------|
 | `30/day`       | 30 minutes every day.                                          |
+| `3x/day`       | 3 sessions of any length every day.                           |
 | `/day`         | Presence-only — any time logged that day counts (no minute goal). |
 | `30/day MTWTF` | 30 minutes on weekdays only; weekends are off-days.            |
+| `3x/day MTWTF` | 3 sessions on weekdays only.                                   |
 | `30/week`      | 30 minutes over the calendar week (Monday–Sunday).             |
+| `2x/week`      | 2 sessions over the calendar week.                            |
 | `/week`        | Presence-only, once per week.                                  |
 | `none`         | Clear the target.                                              |
 
-The weekday letters are positional `MTWTFSS` (Mon–Sun), so `MTWTF` is weekdays
-and `SS` is the weekend. Categories with a target show a dim annotation in the
-list, e.g. `(30 min/day, weekdays)`.
+A bare number is a **minute** goal; a number with an `x` suffix is a
+**session-count** goal (sessions of any length, counted by how many you log —
+cancelled sessions don't count). The two are mutually exclusive. The weekday
+letters are positional `MTWTFSS` (Mon–Sun), so `MTWTF` is weekdays and `SS` is
+the weekend. Categories with a target show a dim annotation in the list, e.g.
+`(30 min/day, weekdays)` or `(3 sessions/day)`.
 
 **Progress HUD.** While a session is active (or paused, or on the What-Next
 screen), a line shows your progress against the current period plus the streak:
@@ -127,11 +133,46 @@ screen), a line shows your progress against the current period plus the streak:
 Keybr: 12/30 min today · 🔥 4-day streak
 ```
 
+The **start screen** also shows progress for *every* targeted category at once,
+in a "Dailies / Weeklies" panel beside the inbox/menu (it stacks below on narrow
+terminals):
+
+```
+Inbox                  Dailies / Weeklies
+1) Reply to Sam        Keybr: 12/30 min today · 🔥 4d
+n) New session         Standup: 2/3 today · 🔥 6d
+q) Quit                Exercise: 0/45 min this week
+```
+
+(Session-count targets read `2/3 today`; minute targets read `12/30 min today`.)
+
 **Streaks.** The streak counts consecutive periods where the target was met.
 For dailies, scheduled off-days (e.g. weekends on an `MTWTF` target) are skipped
 without breaking the run. The current in-progress period never breaks a
 streak — it only extends it once met. Weekly streaks count ISO Monday–Sunday
 weeks.
+
+### Configuration
+
+Optional per-device settings live in `~/.config/jacktasks/config.toml`. The file
+is optional — defaults apply when it's missing. A malformed file (or an invalid
+timezone) is a hard error: the app prints the problem and exits.
+
+```toml
+# Sessions you aim to complete each day. Shows "Sessions today: N/M" on the
+# start and What-Next screens. Omit or set 0 for no target.
+daily_session_target = 6
+
+# IANA timezone used to bucket sessions into days/weeks (Dailies/Weeklies) and
+# to display times. Omit to use the machine's local timezone. Sessions are
+# always stored in UTC epoch seconds — this only affects display and the
+# day/week boundaries for streaks.
+timezone = "America/Denver"
+```
+
+The sync server has its own equivalent for its web view — set
+`JACKTASKS_SYNC_TZ` (e.g. `America/Denver`) in its env file; see
+[Deployment](#deployment-sync-server).
 
 ### Sync
 
@@ -201,7 +242,9 @@ curl http://<tailscale-ip>:8484/healthz    # → {"ok":true}
 [Sync](#sync) above), then run `jacktasks sync`.
 
 The server also serves a read-only, day-grouped browse view of logged sessions at
-its root path (`http://<tailscale-ip>:8484/`).
+its root path (`http://<tailscale-ip>:8484/`). By default it renders times in the
+server's local timezone (often UTC); set `JACKTASKS_SYNC_TZ` in the env file
+(e.g. `America/Denver`) to render in your timezone instead.
 
 To deploy a new server version, repeat step 1, then replace the binary and
 restart the service (`chmod 755` again after replacing) — see `deploy/DEPLOY.md`.

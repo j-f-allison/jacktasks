@@ -72,9 +72,9 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// migrateCategoryTargets adds target_minutes, target_period, and schedule_mask
-// columns to categories if absent. All nullable — no backfill needed.
-// Safe to call on a DB that already has the columns (no-op).
+// migrateCategoryTargets adds target_minutes, target_period, schedule_mask, and
+// target_sessions columns to categories if absent. All nullable — no backfill
+// needed. Safe to call on a DB that already has the columns (no-op).
 func migrateCategoryTargets(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(categories)")
 	if err != nil {
@@ -104,6 +104,7 @@ func migrateCategoryTargets(db *sql.DB) error {
 		{"target_minutes", "ALTER TABLE categories ADD COLUMN target_minutes INTEGER"},
 		{"target_period", "ALTER TABLE categories ADD COLUMN target_period TEXT"},
 		{"schedule_mask", "ALTER TABLE categories ADD COLUMN schedule_mask INTEGER"},
+		{"target_sessions", "ALTER TABLE categories ADD COLUMN target_sessions INTEGER"},
 	}
 	for _, a := range adds {
 		if !existing[a.col] {

@@ -143,7 +143,7 @@ func TestSetCategoryTarget(t *testing.T) {
 	// Set a minute/day target with weekday mask.
 	mins := 30
 	mask := 31 // weekdays
-	if err := s.SetCategoryTarget(ctx, cat.ID, &mins, "day", &mask); err != nil {
+	if err := s.SetCategoryTarget(ctx, cat.ID, &mins, nil, "day", &mask); err != nil {
 		t.Fatalf("set target: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestSetCategoryTarget(t *testing.T) {
 	}
 
 	// Set a presence-only weekly target.
-	if err := s.SetCategoryTarget(ctx, cat.ID, nil, "week", nil); err != nil {
+	if err := s.SetCategoryTarget(ctx, cat.ID, nil, nil, "week", nil); err != nil {
 		t.Fatalf("set weekly target: %v", err)
 	}
 	got2, _ := s.GetCategory(ctx, cat.ID)
@@ -179,18 +179,86 @@ func TestSetCategoryTarget(t *testing.T) {
 		t.Errorf("weekly target should have nil mask, got %v", got2.ScheduleMask)
 	}
 
+	// Set a session-count daily target. Minutes should be cleared.
+	sessions := 3
+	if err := s.SetCategoryTarget(ctx, cat.ID, nil, &sessions, "day", nil); err != nil {
+		t.Fatalf("set session target: %v", err)
+	}
+	gotS, _ := s.GetCategory(ctx, cat.ID)
+	if gotS.TargetMinutes != nil {
+		t.Errorf("session-count target should have nil minutes, got %v", gotS.TargetMinutes)
+	}
+	if gotS.TargetSessions == nil || *gotS.TargetSessions != 3 {
+		t.Errorf("sessions = %v, want 3", gotS.TargetSessions)
+	}
+	if gotS.TargetPeriod != "day" {
+		t.Errorf("period = %q, want day", gotS.TargetPeriod)
+	}
+
 	// Clear the target.
-	if err := s.SetCategoryTarget(ctx, cat.ID, nil, "", nil); err != nil {
+	if err := s.SetCategoryTarget(ctx, cat.ID, nil, nil, "", nil); err != nil {
 		t.Fatalf("clear target: %v", err)
 	}
 	got3, _ := s.GetCategory(ctx, cat.ID)
 	if got3.HasTarget() {
 		t.Error("target should be cleared")
 	}
+	if got3.TargetSessions != nil {
+		t.Errorf("cleared target should have nil sessions, got %v", got3.TargetSessions)
+	}
 
 	// ErrNotFound on unknown ID.
-	if err := s.SetCategoryTarget(ctx, "nope", nil, "day", nil); !errors.Is(err, ErrNotFound) {
+	if err := s.SetCategoryTarget(ctx, "nope", nil, nil, "day", nil); !errors.Is(err, ErrNotFound) {
 		t.Errorf("got %v, want ErrNotFound", err)
+	}
+}
+
+func TestListCategoriesWithTarget(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	proj, _ := s.CreateProject(ctx, "P")
+	withTarget, _ := s.CreateCategory(ctx, "Keybr", proj.ID)
+	noTarget, _ := s.CreateCategory(ctx, "Coding", proj.ID)
+	weekly, _ := s.CreateCategory(ctx, "Exercise", proj.ID)
+
+	// Nothing has a target yet.
+	got, err := s.ListCategoriesWithTarget(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 targeted categories, got %d", len(got))
+	}
+
+	mins := 30
+	if err := s.SetCategoryTarget(ctx, withTarget.ID, &mins, nil, "day", nil); err != nil {
+		t.Fatalf("set day target: %v", err)
+	}
+	if err := s.SetCategoryTarget(ctx, weekly.ID, nil, nil, "week", nil); err != nil {
+		t.Fatalf("set week target: %v", err)
+	}
+	_ = noTarget
+
+	got, err = s.ListCategoriesWithTarget(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 targeted categories, got %d", len(got))
+	}
+	// Sorted by name COLLATE NOCASE: Exercise, Keybr.
+	if got[0].Name != "Exercise" || got[1].Name != "Keybr" {
+		t.Errorf("unexpected order: %q, %q", got[0].Name, got[1].Name)
+	}
+
+	// Clearing a target removes it from the list.
+	if err := s.SetCategoryTarget(ctx, weekly.ID, nil, nil, "", nil); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, _ = s.ListCategoriesWithTarget(ctx)
+	if len(got) != 1 || got[0].Name != "Keybr" {
+		t.Errorf("after clear want [Keybr], got %v", got)
 	}
 }
 

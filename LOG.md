@@ -4,6 +4,93 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-27 — Dailies/Weeklies panel on the start screen (v1.8.0)
+
+The recurring-target progress HUD previously only appeared during an active
+session, for the one category being worked. Now the start screen surfaces
+progress for *every* targeted category at a glance.
+
+**Layout:** two columns. The existing inbox + menu sit on the left; a new
+"Dailies / Weeklies" panel sits on the right, joined via
+`lipgloss.JoinHorizontal`. Below a width of 72 columns (or when there are no
+targeted categories) the panel stacks beneath the menu instead. Each line reuses
+the in-session progress text with a compact streak suffix — `Keybr: 12/30 min
+today · 🔥 4d`, `Exercise: 0/45 min this week`, `Reading: done today · 🔥 9w`.
+
+**Implementation:**
+- `store.ListCategoriesWithTarget` — new query returning all live categories with
+  `target_period` set, sorted by name (`categories.go` + test).
+- Extracted `periodSeconds(...)` helper (day/week window → `SumCategorySecondsBetween`)
+  shared by the existing `loadCategoryProgressCmd` and the new `loadDailiesCmd`,
+  which computes period seconds + `CategoryStreak` for each targeted category.
+- `dailiesLoadedMsg` + `dailies`/`dailiesLoaded` Model fields; the command fires
+  from `Init` only when the start screen (`uiExtraStart`) is shown.
+- Extracted `progressText(cat, periodSec)` from `categoryProgressLine` so the HUD
+  and the panel share the "N/M min today" formatting; the panel adds its own
+  compact `🔥 Nd`/`🔥 Nw` suffix via `dailyPanelLine`.
+- `renderStartScreen` rebuilt to compose a left menu block and join it with
+  `renderDailiesPanel()`; new `writeIndented` helper applies the screen margin to
+  multi-line joined blocks.
+
+Cursor/numeric navigation and all existing status lines (Sessions today, sync
+status/summary) are unchanged. Streak computation adds one `CategoryStreak` query
+per targeted category on startup — fine at personal scale.
+
+**Also in v1.8.0 — session-count targets.** Targets could previously be a minute
+goal (`30/day`) or presence-only (`/day`). Added a third measure: a count of
+logged sessions of any length, syntax `3x/day` / `3x/day MTWTF` / `2x/week` (an
+`x` suffix on the number). A session counts if its row exists in the period;
+cancelled sessions write no row, so they don't count.
+
+- Schema: new nullable `target_sessions INTEGER` on categories, added to the
+  existing `migrateCategoryTargets` column loop (idempotent ADD COLUMN). It joins
+  the categories sync wire format (column list in `sync.go` + `upsertCategory`
+  INSERT/conflict). **All three binaries (both Macs + the sync server) need
+  reinstalling**, like any sync-touching change.
+- `target.Parse`/`Format` gained a `sessions *int` return/param; the number token
+  with an `x` suffix parses as a session count. minutes and sessions are mutually
+  exclusive (the grammar can't express both). `SetCategoryTarget` gained a
+  `sessions` param.
+- `store.CountCategorySessionsBetween` (new) backs both the streak check
+  (`periodMet` now switches sessions → minutes → presence) and the progress
+  display. `periodProgress` (model) returns either a second-count or a
+  session-count depending on the target type.
+- Display: session-count progress reads `Name: 2/3 today` (no unit word, per the
+  agreed format); minute/presence forms unchanged. List annotation reads
+  `(3 sessions/day)`.
+
+New tests: parse/format for `Nx/day|week` incl. error cases, store round-trip for
+`target_sessions`, `CountCategorySessionsBetween`, and a session-count daily
+streak (met/under-target).
+
+**Also in v1.8.0 — configurable display/bucketing timezone.** Sessions are
+stored in UTC epoch seconds (unchanged, correct). What was implicit was the
+*display* timezone: the local app bucketed days/weeks by `time.Local`, and the
+server's web view rendered `StartedAt.Local()` — which on the UTC Ubuntu box
+showed everything in UTC. Both are now configurable.
+
+- **Local app:** new `timezone` key in `config.toml` (IANA name, e.g.
+  `America/Denver`). `config.Load` resolves it to a `*time.Location` (now exposed
+  as `Config.Location`, defaulting to `time.Local`); an invalid name is a hard
+  error, matching the existing parse-error-and-exit policy. The Model carries
+  `loc`, and `m.now` is now `time.Now().In(loc)` (set at construction, on every
+  tick, and for the today-session count). Because all period/streak code already
+  keys off `now.Location()`, that single change flows the configured tz through
+  `periodBounds`, `CountTodaySessions`, and `CategoryStreak` with no other edits.
+- **Server:** new optional `JACKTASKS_SYNC_TZ` env var. `cmd/jacktasks-sync`
+  resolves it (fatal on bad name) and passes a `*time.Location` into
+  `syncserver.NewMux`, threaded to `groupByDay`/`handleSessions`, which now bucket
+  and format in that tz instead of `.Local()`. Defaults to the server's local tz.
+- Docs/deploy: `deploy/env.template` and `DEPLOY.md` document `JACKTASKS_SYNC_TZ`;
+  README gains a Configuration section covering both `config.toml` and the env var.
+- Tests: config timezone parse/validate/default; a web-view test asserting a
+  02:00-UTC session buckets on the previous calendar day under `America/Denver`
+  vs the same day under UTC (skips if host `tzdata` is missing).
+
+Version bumped 1.7.0 → 1.8.0 (all three additions land in the same unreleased
+bump). Requires `make install` on each Mac **and** a server redeploy. Full suite
+green.
+
 ## 2026-05-27 — Document Dailies & Weeklies in README
 
 Added a "Dailies & Weeklies" subsection to `README.md` under "Using it": the

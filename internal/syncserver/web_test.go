@@ -4,11 +4,14 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/j-f-allison/jacktasks/internal/store"
+	"github.com/j-f-allison/jacktasks/internal/syncserver"
 )
 
 // seedSession inserts a project, a category under it, and one finished session,
@@ -95,6 +98,51 @@ func TestWebSessionsEarlyBadge(t *testing.T) {
 	}
 	if !strings.Contains(body, "early") {
 		t.Errorf("body missing early badge")
+	}
+}
+
+// TestWebSessionsTimezone confirms the web view buckets and labels sessions in
+// the configured timezone, not UTC. A session at 02:00 UTC falls on the
+// previous calendar day in America/Denver (UTC-6).
+func TestWebSessionsTimezone(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "tz.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	proj, _ := st.CreateProject(ctx, "Website")
+	cat, _ := st.CreateCategory(ctx, "Coding", proj.ID)
+	// 2026-05-26 02:00:00 UTC → 2026-05-25 20:00 in Denver.
+	start := time.Date(2026, 5, 26, 2, 0, 0, 0, time.UTC)
+	if _, err := st.CreateSession(ctx, store.CreateSessionInput{
+		CategoryID: cat.ID, ProjectID: proj.ID,
+		PlannedDurationMin: 25, ActualDurationSec: 1500,
+		StartedAt: start, EndedAt: start.Add(25 * time.Minute),
+		Status: store.SessionCompleted, DeviceID: "test-device",
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	denver, err := time.LoadLocation("America/Denver")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+
+	denverSrv := httptest.NewServer(syncserver.NewMux(st, testToken, denver))
+	defer denverSrv.Close()
+	_, denverBody := getNoAuth(t, denverSrv.URL+"/")
+	if !strings.Contains(denverBody, "25 May 2026") {
+		t.Errorf("Denver view should bucket on 25 May; body:\n%s", denverBody)
+	}
+
+	utcSrv := httptest.NewServer(syncserver.NewMux(st, testToken, time.UTC))
+	defer utcSrv.Close()
+	_, utcBody := getNoAuth(t, utcSrv.URL+"/")
+	if !strings.Contains(utcBody, "26 May 2026") {
+		t.Errorf("UTC view should bucket on 26 May; body:\n%s", utcBody)
 	}
 }
 

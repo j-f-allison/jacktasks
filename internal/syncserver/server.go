@@ -17,10 +17,14 @@ import (
 
 // NewMux builds and returns the HTTP mux for the sync server.
 // token is the required bearer token; requests without it get 401.
-func NewMux(st *store.Store, token string) http.Handler {
+// loc is the timezone the read-only web view renders session times in.
+func NewMux(st *store.Store, token string, loc *time.Location) http.Handler {
+	if loc == nil {
+		loc = time.Local
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /{$}", handleSessions(st))
+	mux.HandleFunc("GET /{$}", handleSessions(st, loc))
 	mux.HandleFunc("POST /push", handlePush(st))
 	mux.HandleFunc("GET /pull", handlePull(st))
 	return authMiddleware(token, mux)

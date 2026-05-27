@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS categories (
   arrived_at      INTEGER NOT NULL DEFAULT 0,
   target_minutes  INTEGER,
   target_period   TEXT,
-  schedule_mask   INTEGER
+  schedule_mask   INTEGER,
+  target_sessions INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS sessions (

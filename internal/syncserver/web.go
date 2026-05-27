@@ -33,8 +33,9 @@ type webSession struct {
 // handleSessions renders the read-only, day-grouped list of logged sessions.
 // It is intentionally unauthenticated — the server binds only to the Tailscale
 // interface, so network reachability is the access control (same posture as
-// /healthz). Times are rendered in the server's local timezone.
-func handleSessions(st *store.Store) http.HandlerFunc {
+// /healthz). Times are rendered in loc (from JACKTASKS_SYNC_TZ; the server's
+// local timezone if unset).
+func handleSessions(st *store.Store, loc *time.Location) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		views, err := st.ListSessionViews(r.Context(), webSessionLimit)
 		if err != nil {
@@ -43,7 +44,7 @@ func handleSessions(st *store.Store) http.HandlerFunc {
 			return
 		}
 
-		groups := groupByDay(views)
+		groups := groupByDay(views, loc)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := sessionsTmpl.Execute(w, struct {
 			Groups []dayGroup
@@ -55,12 +56,13 @@ func handleSessions(st *store.Store) http.HandlerFunc {
 }
 
 // groupByDay turns newest-first session views into day-labelled groups,
-// preserving the newest-first order both across and within days.
-func groupByDay(views []store.SessionView) []dayGroup {
+// preserving the newest-first order both across and within days. Times are
+// bucketed and formatted in loc.
+func groupByDay(views []store.SessionView, loc *time.Location) []dayGroup {
 	var groups []dayGroup
 	var curKey string
 	for _, v := range views {
-		local := v.StartedAt.Local()
+		local := v.StartedAt.In(loc)
 		key := local.Format("2006-01-02")
 		ws := webSession{
 			Time:      local.Format("15:04"),

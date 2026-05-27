@@ -32,7 +32,7 @@ func newStore(t *testing.T) *store.Store {
 func newSyncServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	serverSt := newStore(t)
-	srv := httptest.NewServer(syncserver.NewMux(serverSt, testToken))
+	srv := httptest.NewServer(syncserver.NewMux(serverSt, testToken, time.Local))
 	t.Cleanup(srv.Close)
 	return srv, serverSt
 }
