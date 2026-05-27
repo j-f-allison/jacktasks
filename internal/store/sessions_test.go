@@ -296,3 +296,60 @@ func TestLatestSession(t *testing.T) {
 		t.Errorf("StartedAt = %v, want %v", latest.StartedAt, now.Add(2*time.Minute).Truncate(time.Second))
 	}
 }
+
+func TestListSessionViews(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	catID, projID := sessionFixtures(t, s)
+
+	start := time.Now().Add(-time.Hour)
+	if _, err := s.CreateSession(ctx, CreateSessionInput{
+		CategoryID:         catID,
+		ProjectID:          projID,
+		PlannedDurationMin: 25,
+		ActualDurationSec:  1500,
+		StartedAt:          start,
+		EndedAt:            start.Add(25 * time.Minute),
+		EndNotes:           "ship it",
+		Status:             SessionCompleted,
+		DeviceID:           "macbook-test",
+	}); err != nil {
+		t.Fatalf("create with project: %v", err)
+	}
+	// A no-project session: ProjectName must come back empty.
+	noProjCat, err := s.CreateOrGetCategoryByName(ctx, "Reading", "")
+	if err != nil {
+		t.Fatalf("no-project category: %v", err)
+	}
+	if _, err := s.CreateSession(ctx, CreateSessionInput{
+		CategoryID:        noProjCat.ID,
+		ActualDurationSec: 600,
+		StartedAt:         time.Now(),
+		EndedAt:           time.Now().Add(10 * time.Minute),
+		Status:            SessionEndedEarly,
+		DeviceID:          "macbook-test",
+	}); err != nil {
+		t.Fatalf("create no-project: %v", err)
+	}
+
+	views, err := s.ListSessionViews(ctx, 0)
+	if err != nil {
+		t.Fatalf("list views: %v", err)
+	}
+	if len(views) != 2 {
+		t.Fatalf("got %d views, want 2", len(views))
+	}
+	// Newest-first: the no-project session started "now", so it sorts first.
+	if views[0].ProjectName != "" {
+		t.Errorf("no-project view ProjectName = %q, want empty", views[0].ProjectName)
+	}
+	if views[0].CategoryName != "Reading" {
+		t.Errorf("CategoryName = %q, want Reading", views[0].CategoryName)
+	}
+	if views[1].ProjectName != "memo" || views[1].CategoryName != "Coding" {
+		t.Errorf("project view = %q/%q, want memo/Coding", views[1].ProjectName, views[1].CategoryName)
+	}
+	if views[1].EndNotes != "ship it" {
+		t.Errorf("EndNotes = %q, want ship it", views[1].EndNotes)
+	}
+}

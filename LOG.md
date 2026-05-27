@@ -4,6 +4,18 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-26 — Read-only web session view on the sync server (v1.7.0)
+
+Adds a browsable list of logged sessions, served by the existing `jacktasks-sync` server on the ThinkCentre. The master DB already holds every session from both Macs, so the view needs no new data plumbing — just a render. No new binary on the Mac (the TUI is unchanged); requires a sync-server redeploy (`make build-sync-linux` → scp → restart). Version still bumped to 1.7.0 to track the feature, even though it lands in the sync binary rather than the TUI.
+
+This is a deliberate, minimal take on "View Past Sessions UI," which PROJECT.md lists under "deliberately out of V1." Read-only, no analytics, no editing — just viewing, which is what the user asked for before going daily-driver.
+
+**Store:** `ListSessionViews(ctx, limit)` in `sessions.go` — sessions newest-first LEFT JOINed to projects and categories for display names (`SessionView` embeds `Session` + `ProjectName`/`CategoryName`). Dedicated inline scan rather than touching the shared `scanSession`. No-project sessions yield empty `ProjectName`. Test covers the join, no-project case, and newest-first ordering.
+
+**Server (`internal/syncserver/`):** new `web.go` renders an `html/template` page (no new deps) grouped by calendar day in the server's local timezone, with inline end notes and a done/early status badge; Tokyo Night palette to match the TUI. Capped at 500 sessions. Registered as `GET /{$}` in `NewMux`. Auth: the page is intentionally unauthenticated — `authMiddleware` now consults a `publicPaths` set (`/healthz` + `/`); the server binds only to the Tailscale interface, so reachability is the access control (the user's explicit choice). The sync API (`/push`, `/pull`) still requires the bearer token — covered by a regression test. Four new web tests (renders without auth, empty state, early badge, `/pull` still 401s).
+
+**Deploy:** after redeploying, the view is at `http://<thinkcentre-tailscale-ip>:8484/` in any browser on the tailnet. DEPLOY.md updated with this note.
+
 ## 2026-05-26 — Dailies & Weeklies: recurring category targets + streaks (v1.6.0)
 
 Adds optional recurring targets to categories (daily or weekly, with minute goal or presence-only, with optional weekday schedule for dailies), plus query-time streak computation and an in-session HUD.

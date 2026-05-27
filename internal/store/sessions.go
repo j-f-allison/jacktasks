@@ -130,6 +130,72 @@ func (s *Store) ListSessions(ctx context.Context, limit int) ([]Session, error) 
 	return out, rows.Err()
 }
 
+// SessionView is a session enriched with the human-readable names of its
+// project and category, for display surfaces that don't want to resolve IDs
+// themselves (e.g. the read-only web view on the sync server).
+type SessionView struct {
+	Session
+	ProjectName  string // empty when the session has no project
+	CategoryName string // empty only if the category row is missing
+}
+
+// ListSessionViews returns sessions newest-first, up to limit, each joined with
+// its project and category names. limit<=0 uses 100. A missing project (NULL
+// project_id) yields an empty ProjectName.
+func (s *Store) ListSessionViews(ctx context.Context, limit int) ([]SessionView, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT se.id, se.category_id, se.project_id, se.planned_duration_min,
+		        se.actual_duration_sec, se.started_at, se.ended_at, se.end_notes,
+		        se.status, se.created_at, se.device_id,
+		        p.name, c.name
+		 FROM sessions se
+		 LEFT JOIN projects p ON p.id = se.project_id
+		 LEFT JOIN categories c ON c.id = se.category_id
+		 ORDER BY se.started_at DESC
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query session views: %w", err)
+	}
+	defer rows.Close()
+
+	var out []SessionView
+	for rows.Next() {
+		var v SessionView
+		var startedAt, endedAt, createdAt int64
+		var projectID, endNotes, projectName, categoryName sql.NullString
+		var status string
+
+		if err := rows.Scan(
+			&v.ID, &v.CategoryID, &projectID,
+			&v.PlannedDurationMin, &v.ActualDurationSec,
+			&startedAt, &endedAt, &endNotes, &status,
+			&createdAt, &v.DeviceID,
+			&projectName, &categoryName,
+		); err != nil {
+			return nil, err
+		}
+		v.StartedAt = time.Unix(startedAt, 0)
+		v.EndedAt = time.Unix(endedAt, 0)
+		v.CreatedAt = time.Unix(createdAt, 0)
+		if projectID.Valid {
+			v.ProjectID = projectID.String
+		}
+		if endNotes.Valid {
+			v.EndNotes = endNotes.String
+		}
+		v.Status = SessionStatus(status)
+		v.ProjectName = projectName.String
+		v.CategoryName = categoryName.String
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // GetSession returns the session with the given id. Returns ErrNotFound
 // if no row matches.
 func (s *Store) GetSession(ctx context.Context, id string) (*Session, error) {

@@ -20,16 +20,26 @@ import (
 func NewMux(st *store.Store, token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /{$}", handleSessions(st))
 	mux.HandleFunc("POST /push", handlePush(st))
 	mux.HandleFunc("GET /pull", handlePull(st))
 	return authMiddleware(token, mux)
 }
 
-// authMiddleware rejects requests that do not present the correct bearer token.
-// The /healthz endpoint is exempt — it is used for basic liveness checks.
+// publicPaths are served without a bearer token. /healthz is a liveness probe;
+// "/" is the read-only web view (the server binds only to the Tailscale
+// interface, so reachability is the access control). Everything else — the
+// sync API — still requires the token.
+var publicPaths = map[string]bool{
+	"/healthz": true,
+	"/":        true,
+}
+
+// authMiddleware rejects requests that do not present the correct bearer token,
+// except for the paths in publicPaths.
 func authMiddleware(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
+		if !publicPaths[r.URL.Path] {
 			auth := r.Header.Get("Authorization")
 			want := "Bearer " + token
 			if auth != want {

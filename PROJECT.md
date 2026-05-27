@@ -362,7 +362,7 @@ For each table: push rows newer than `sync_state.last_push_at`, then pull rows n
 To prevent scope creep:
 
 - View Categories management UI (rename, archive, merge)
-- View Past Sessions / analytics UI
+- Session **analytics** UI (totals, charts, trends). Note: a deliberately minimal, read-only **session list** shipped in v1.7.0 — the `jacktasks-sync` server serves a day-grouped browse view of logged sessions at its root path. That's viewing only; analytics stays out of V1.
 - View Reminders standalone view
 - Idle / away-from-keyboard detection
 - macOS notifications on session end

@@ -73,6 +73,19 @@ curl http://$(tailscale ip -4):8484/healthz
 # expected: {"ok":true}
 ```
 
+### Web session view
+
+The server also serves a read-only, day-grouped list of all logged sessions at
+the root path. From any device on the tailnet, open in a browser:
+
+```
+http://<thinkcentre-tailscale-ip>:8484/
+```
+
+This page is intentionally unauthenticated — the server binds only to the
+Tailscale interface, so reachability is the access control. The sync API
+(`/push`, `/pull`) still requires the bearer token.
+
 ## 5. On each Mac — configure the client
 
 Add to your shell profile (`~/.zshrc` or equivalent):
