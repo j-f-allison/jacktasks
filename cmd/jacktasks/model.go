@@ -906,7 +906,7 @@ func (m Model) syncStatusLine() string {
 func (m Model) timerPct() float64 {
 	switch m.machine.State() {
 	case session.StateActive, session.StatePaused:
-		planned := time.Duration(m.machine.PlannedMin()) * time.Minute
+		planned := time.Duration(m.machine.TargetMin()) * time.Minute
 		if planned == 0 {
 			return 0
 		}
@@ -1993,7 +1993,7 @@ func (m Model) renderHeader() string {
 	state := m.machine.State()
 	if state == session.StateActive || state == session.StatePaused {
 		rem := m.machine.TimeRemaining(m.now)
-		planned := time.Duration(m.machine.PlannedMin()) * time.Minute
+		planned := time.Duration(m.machine.TargetMin()) * time.Minute
 		right = StyleDim.Render(fmt.Sprintf("%s/%s  %s/%s",
 			projectLabel(m.selectedProjName), m.selectedCatName,
 			formatDuration(rem), formatDuration(planned)))
@@ -2255,7 +2255,7 @@ func (m Model) renderContent(b *strings.Builder) {
 
 	case session.StateActive:
 		rem := m.machine.TimeRemaining(m.now)
-		planned := time.Duration(m.machine.PlannedMin()) * time.Minute
+		planned := time.Duration(m.machine.TargetMin()) * time.Minute
 		if !m.redFlashUntil.IsZero() && m.now.Before(m.redFlashUntil) {
 			fmt.Fprintf(b, "%s\n\n", StyleFlashOn.Render("  ▶  NEW SESSION STARTED  ◀"))
 		}
@@ -2285,7 +2285,7 @@ func (m Model) renderContent(b *strings.Builder) {
 			break
 		}
 		rem := m.machine.TimeRemaining(m.now)
-		planned := time.Duration(m.machine.PlannedMin()) * time.Minute
+		planned := time.Duration(m.machine.TargetMin()) * time.Minute
 		fmt.Fprintf(b, "  %s\n\n", StylePaused.Render("⏸  Paused"))
 		prog := m.prog
 		if m.width > 0 {

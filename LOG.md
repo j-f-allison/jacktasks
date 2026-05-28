@@ -4,6 +4,19 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-28 — v1.10.1 — Timer display reflects session extensions
+
+Fix: after `ext <n>` (or the auto-extension when a mid-session break ends), the timer display still showed the original planned duration on the right-hand side (e.g. `2:26 / 20:00` on a 20-min session that had been extended). The progress bar was also computed against the original duration, so it would visually regress when the remaining time jumped up.
+
+`Extend` previously only shifted `targetEnd` and explicitly left `plannedMin` untouched, with the comment noting that `planned_duration_min` is what gets persisted to the DB. We want to preserve that — `PlannedDurationMin` in the DB should still record the user's original commitment so we can compare planned vs actual — so the fix tracks extensions in a new `extendedMin` field on `Machine`, and adds a `TargetMin()` accessor (= `plannedMin + extendedMin`) for display. The four timer-render sites in `cmd/jacktasks/model.go` (header right-column, `timerPct`, Active panel, Paused panel) now use `TargetMin()`; `PlannedMin()` is unchanged and continues to feed `ToStoreSessionInput`.
+
+Side effects also pulled in to keep things consistent:
+
+- `TimeRemaining` in the Paused branch now uses `plannedMin + extendedMin` so extending while paused gives meaningful remaining time once resumed.
+- `End`'s completed-vs-ended-early threshold now compares against the extended target, so a session that was extended and then run to (near) its new target counts as completed.
+- The Shift+Tab auto-continue path (`handleEndingNotesBreakContinue`) still reads `PlannedMin()` — "another planned-duration block" should be the original block size, not the cumulative one.
+- Recovery sentinel gains an optional `extended_min` field (JSON-omitempty, no version bump) so an extended session survives a crash with its target intact.
+
 ## 2026-05-28 — v1.10.0 — Due-date-driven start-screen reminders
 
 Rework of the start-screen reminders panel so urgent items surface and noise drops away.

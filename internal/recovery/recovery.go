@@ -40,6 +40,7 @@ type Sentinel struct {
 	CategoryID         string          `json:"category_id"`
 	CategoryName       string          `json:"category_name"`
 	PlannedDurationMin int             `json:"planned_duration_min"`
+	ExtendedMin        int             `json:"extended_min,omitempty"`
 	StartedAt          int64           `json:"started_at"`
 	TargetEndAt        int64           `json:"target_end_at"`
 	Pauses             []PauseRecord   `json:"pauses"`

@@ -72,9 +72,10 @@ type Machine struct {
 	state State
 
 	// setup fields, populated during SetupCategory/Project/Duration
-	categoryID string
-	projectID  string
-	plannedMin int
+	categoryID  string
+	projectID   string
+	plannedMin  int
+	extendedMin int // minutes added via Extend; not persisted to the DB
 
 	// active session fields
 	sessionID  string
@@ -116,7 +117,7 @@ func (m *Machine) TimeRemaining(now time.Time) time.Duration {
 		// target will shift on resume; return distance from now to adjusted target
 		// treating current pause as not yet counted
 		elapsed := m.pausedDuration(now)
-		planned := time.Duration(m.plannedMin) * time.Minute
+		planned := time.Duration(m.plannedMin+m.extendedMin) * time.Minute
 		actual := now.Sub(m.startedAt) - elapsed
 		remaining := planned - actual
 		if remaining < 0 {
@@ -247,7 +248,10 @@ func (m *Machine) AddCapture(text string, now time.Time) error {
 }
 
 // Extend shifts the target end time forward by n minutes. Valid from Active
-// or Paused. Does not affect actual_duration_sec or planned_duration_min.
+// or Paused. Does not affect actual_duration_sec or planned_duration_min
+// (the original commitment, which is what gets saved to the DB); the
+// extension is tracked separately via extendedMin so the timer display
+// can show the new total via TargetMin.
 func (m *Machine) Extend(minutes int, now time.Time) error {
 	if m.state != StateActive && m.state != StatePaused {
 		return fmt.Errorf("%w: %s", ErrWrongState, m.state)
@@ -256,6 +260,7 @@ func (m *Machine) Extend(minutes int, now time.Time) error {
 		return errors.New("extension must be positive")
 	}
 	m.targetEnd = m.targetEnd.Add(time.Duration(minutes) * time.Minute)
+	m.extendedMin += minutes
 	return nil
 }
 
@@ -283,7 +288,7 @@ func (m *Machine) End(now time.Time) error {
 	m.endedAt = now
 
 	actualSec := m.actualDurationSec()
-	plannedSec := m.plannedMin * 60
+	plannedSec := (m.plannedMin + m.extendedMin) * 60
 	if plannedSec-actualSec <= 5*60 {
 		// 5 min or less remaining counts as completed — not worth a resume prompt.
 		m.status = store.SessionCompleted
@@ -414,8 +419,13 @@ func (m *Machine) CategoryID() string { return m.categoryID }
 // ProjectID returns the selected project ID.
 func (m *Machine) ProjectID() string { return m.projectID }
 
-// PlannedMin returns the planned duration in minutes.
+// PlannedMin returns the originally planned duration in minutes (what gets
+// saved to the DB). It does not change when Extend is called.
 func (m *Machine) PlannedMin() int { return m.plannedMin }
+
+// TargetMin returns the current target duration in minutes, including any
+// extensions made via Extend. Use this for the timer-display denominator.
+func (m *Machine) TargetMin() int { return m.plannedMin + m.extendedMin }
 
 // StartedAt returns when the current session started.
 func (m *Machine) StartedAt() time.Time { return m.startedAt }
@@ -470,6 +480,7 @@ func (m *Machine) Snapshot(now time.Time, projectName, categoryName string) (rec
 		CategoryID:         m.categoryID,
 		CategoryName:       categoryName,
 		PlannedDurationMin: m.plannedMin,
+		ExtendedMin:        m.extendedMin,
 		StartedAt:          m.startedAt.Unix(),
 		TargetEndAt:        m.targetEnd.Unix(),
 		Pauses:             completed,
@@ -526,7 +537,8 @@ func Hydrate(s recovery.Sentinel, now time.Time) (*Machine, error) {
 		state:      state,
 		categoryID: s.CategoryID,
 		projectID:  s.ProjectID,
-		plannedMin: s.PlannedDurationMin,
+		plannedMin:  s.PlannedDurationMin,
+		extendedMin: s.ExtendedMin,
 		sessionID:  s.SessionID,
 		startedAt:  startedAt,
 		targetEnd:  time.Unix(s.TargetEndAt, 0),
