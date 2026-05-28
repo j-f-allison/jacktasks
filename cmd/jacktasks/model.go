@@ -194,6 +194,17 @@ type Model struct {
 	// when the 5-min break ends
 	breakEnd time.Time
 
+	// Shift+Tab on EndingNotes: skip the note, take a 5-min break, then
+	// auto-start a new session with the same project/category/duration.
+	// autoContinueMin holds the planned duration to use; zero means no
+	// auto-continue is pending.
+	autoContinueMin int
+
+	// redFlashUntil draws a red "SESSION STARTED" banner over the Active
+	// screen until the wall clock passes this time. Set when the auto-continue
+	// break ends to warn the user the new session has begun.
+	redFlashUntil time.Time
+
 	// non-fatal inline error
 	errMsg string
 
@@ -430,12 +441,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.enterEndingNotes()
 			return m, tea.Batch(cmds...)
 		}
-		// Auto-end break after 5 minutes.
+		// Auto-end inter-session break after 5 minutes (existing WhatNext break).
 		if machState == session.StateBreak && !m.breakEnd.IsZero() && !m.now.Before(m.breakEnd) {
 			_ = m.machine.EndBreak(m.now)
 			m.breakEnd = time.Time{}
 			m.input.Reset()
 			m.input.Placeholder = "1-4"
+			return m, tea.Batch(cmds...)
+		}
+		// Auto-end the mid-session break (Shift+Tab from end-notes), which is
+		// modeled as a Pause + breakEnd + autoContinueMin. Resume the session
+		// and extend by another planned-duration block.
+		if machState == session.StatePaused && m.autoContinueMin > 0 && !m.breakEnd.IsZero() && !m.now.Before(m.breakEnd) {
+			planMin := m.autoContinueMin
+			m.autoContinueMin = 0
+			m.breakEnd = time.Time{}
+			if err := m.machine.Resume(m.now); err != nil {
+				m.errMsg = err.Error()
+			} else if err := m.machine.Extend(planMin, m.now); err != nil {
+				m.errMsg = err.Error()
+			} else {
+				m.redFlashUntil = m.now.Add(2 * time.Second)
+				m.input.Reset()
+				m.input.Placeholder = "command"
+				cmds = append(cmds, m.writeSentinelCmd())
+			}
 			return m, tea.Batch(cmds...)
 		}
 		return m, tea.Batch(cmds...)
@@ -649,6 +679,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyTab {
 			return m.handleEndingNotesExtend()
 		}
+		if msg.Type == tea.KeyShiftTab {
+			return m.handleEndingNotesBreakContinue()
+		}
 		var taCmd tea.Cmd
 		m.noteArea, taCmd = m.noteArea.Update(msg)
 		return m, taCmd
@@ -698,6 +731,26 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case session.StateSetupDuration:
 		return m.handleDurationInput(val)
 	case session.StateActive, session.StatePaused:
+		// Mid-session break (Shift+Tab from end-notes): Enter with no command
+		// ends the break early and resumes the session with a full new
+		// planned-duration block.
+		if val == "" && m.machine.State() == session.StatePaused && m.autoContinueMin > 0 {
+			planMin := m.autoContinueMin
+			m.autoContinueMin = 0
+			m.breakEnd = time.Time{}
+			if err := m.machine.Resume(m.now); err != nil {
+				m.errMsg = err.Error()
+				return m, tiCmd
+			}
+			if err := m.machine.Extend(planMin, m.now); err != nil {
+				m.errMsg = err.Error()
+				return m, tiCmd
+			}
+			m.redFlashUntil = m.now.Add(2 * time.Second)
+			m.input.Reset()
+			m.input.Placeholder = "command"
+			return m, tea.Batch(tiCmd, m.writeSentinelCmd())
+		}
 		return m.handleActiveCommand(val)
 	case session.StateEndingNotes:
 		return m.handleEndingNotes(val)
@@ -1380,6 +1433,32 @@ func (m Model) handleEndingNotesExtend() (tea.Model, tea.Cmd) {
 	return m, m.writeSentinelCmd()
 }
 
+// handleEndingNotesBreakContinue is the Shift+Tab shortcut: undo End, run a
+// 5-min break (modeled as a Pause so the break time is excluded from
+// actual_duration_sec), then auto-extend the session by another planned-
+// duration block when the break ends. The session is kept as a single row
+// with one reflection note covering all the work + break cycles, so e.g.
+// 20 + break + 20 + break + 20 saves as one 60-min session.
+func (m Model) handleEndingNotesBreakContinue() (tea.Model, tea.Cmd) {
+	plannedMin := m.machine.PlannedMin()
+	if err := m.machine.ResumeFromEndingNotes(m.now); err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	if err := m.machine.Pause(m.now); err != nil {
+		m.errMsg = err.Error()
+		return m, nil
+	}
+	m.breakEnd = m.now.Add(5 * time.Minute)
+	m.autoContinueMin = plannedMin
+	m.noteArea.SetValue("")
+	m.noteArea.Blur()
+	m.input.Reset()
+	m.input.Placeholder = "enter to end early"
+	m.input.Focus()
+	return m, m.writeSentinelCmd()
+}
+
 // handleReminderDisposition resolves the post-session prompt asking whether to
 // mark the originating Reminders item complete. y → mark complete + save;
 // n → leave reminder active + save.
@@ -2027,6 +2106,9 @@ func (m Model) renderContent(b *strings.Builder) {
 	case session.StateActive:
 		rem := m.machine.TimeRemaining(m.now)
 		planned := time.Duration(m.machine.PlannedMin()) * time.Minute
+		if !m.redFlashUntil.IsZero() && m.now.Before(m.redFlashUntil) {
+			fmt.Fprintf(b, "%s\n\n", StyleFlashOn.Render("  ▶  NEW SESSION STARTED  ◀"))
+		}
 		fmt.Fprintf(b, "  %s\n\n", StyleActive.Render("■ Active"))
 		prog := m.prog
 		if m.width > 0 {
@@ -2041,6 +2123,17 @@ func (m Model) renderContent(b *strings.Builder) {
 		}
 
 	case session.StatePaused:
+		if m.autoContinueMin > 0 && !m.breakEnd.IsZero() {
+			rem := m.breakEnd.Sub(m.now)
+			if rem < 0 {
+				rem = 0
+			}
+			fmt.Fprintf(b, "  %s\n\n", StyleTimer.Render("☕ Break"))
+			fmt.Fprintf(b, "  %s  %s\n\n",
+				StyleTimer.Render(formatDuration(rem)),
+				StyleDim.Render(fmt.Sprintf("· session resumes with +%dm when break ends · Enter to end break early", m.autoContinueMin)))
+			break
+		}
 		rem := m.machine.TimeRemaining(m.now)
 		planned := time.Duration(m.machine.PlannedMin()) * time.Minute
 		fmt.Fprintf(b, "  %s\n\n", StylePaused.Render("⏸  Paused"))
@@ -2067,14 +2160,14 @@ func (m Model) renderContent(b *strings.Builder) {
 		}
 		writeCaptureList(b, m.machine.Captures())
 		if m.noteArea.Value() == "" {
-			banner := fmt.Sprintf("  ▶  SESSION ENDED — Enter to skip · Tab for +%dm  ◀", tabExtendMinutes)
+			banner := fmt.Sprintf("  ▶  SESSION ENDED — Enter to skip · Tab for +%dm · Shift+Tab for 5m break + continue  ◀", tabExtendMinutes)
 			style := StyleFlashOff
 			if m.flashOn {
 				style = StyleFlashOn
 			}
 			fmt.Fprintf(b, "%s\n\n", style.Render(banner))
 		} else {
-			fmt.Fprintf(b, "  End notes (Enter to save · Tab for +%dm):\n\n", tabExtendMinutes)
+			fmt.Fprintf(b, "  End notes (Enter to save · Tab for +%dm · Shift+Tab for 5m break + continue):\n\n", tabExtendMinutes)
 		}
 
 	case session.StateWhatNext:
@@ -2342,18 +2435,65 @@ func progressText(cat store.Category, periodSec, periodCount int) string {
 	}
 }
 
-// dailyPanelLine formats one targeted category for the start-screen panel, with
-// a compact streak suffix ("· 🔥 4d" / "· 🔥 2w").
+// dailyPanelLine formats one targeted category for the start-screen panel: an
+// inline progress bar (same green as the in-session timer), the progress text,
+// and a compact streak suffix ("· 🔥 4d" / "· 🔥 2w").
 func dailyPanelLine(e dailyEntry) string {
-	line := progressText(e.cat, e.periodSec, e.periodCount)
+	bar := renderProgressBar(progressRatio(e.cat, e.periodSec, e.periodCount), 10)
+	line := bar + " " + StyleDim.Render(progressText(e.cat, e.periodSec, e.periodCount))
 	if e.streak > 0 {
 		unit := "d"
 		if e.cat.TargetPeriod == target.PeriodWeek {
 			unit = "w"
 		}
-		line += fmt.Sprintf(" · 🔥 %d%s", e.streak, unit)
+		line += StyleDim.Render(fmt.Sprintf(" · 🔥 %d%s", e.streak, unit))
 	}
 	return line
+}
+
+// progressRatio returns the 0..1 fill ratio for a targeted category. Session
+// and minute targets divide count by target; presence-only is 0 or 1.
+func progressRatio(cat store.Category, periodSec, periodCount int) float64 {
+	var r float64
+	switch {
+	case cat.TargetSessions != nil:
+		if *cat.TargetSessions > 0 {
+			r = float64(periodCount) / float64(*cat.TargetSessions)
+		}
+	case cat.TargetMinutes != nil:
+		if *cat.TargetMinutes > 0 {
+			r = float64(periodSec) / float64(*cat.TargetMinutes*60)
+		}
+	default:
+		if periodSec > 0 {
+			r = 1
+		}
+	}
+	if r > 1 {
+		r = 1
+	}
+	if r < 0 {
+		r = 0
+	}
+	return r
+}
+
+// renderProgressBar draws a width-wide bar using █ for the filled portion (in
+// StyleAccent, matching the in-session timer color) and ░ for the empty portion
+// (dimmed). Includes the surrounding [ ].
+func renderProgressBar(ratio float64, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	filled := int(ratio*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return "[" + StyleAccent.Render(strings.Repeat("█", filled)) +
+		StyleDim.Render(strings.Repeat("░", width-filled)) + "]"
 }
 
 // renderDailiesPanel builds the right-hand Dailies/Weeklies panel for the start
@@ -2367,7 +2507,7 @@ func (m Model) renderDailiesPanel() string {
 	b.WriteByte('\n')
 	for _, e := range m.dailies {
 		b.WriteByte('\n')
-		b.WriteString(StyleDim.Render(dailyPanelLine(e)))
+		b.WriteString(dailyPanelLine(e))
 	}
 	return b.String()
 }

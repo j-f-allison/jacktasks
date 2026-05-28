@@ -4,13 +4,14 @@ Instructions for Claude (chat or Code) when working on this project. Read `PROJE
 
 ## Current handoff state (2026-05-27)
 
-Post-V1 feature development. Current version: v1.8.0.
+Post-V1 feature development. Current version: v1.9.0.
 - v1.3.0: Cancel session (`cancel` command on Active/Paused)
 - v1.4.0: Per-project Reminders list (schema migration + EventKit generalization + TUI)
 - v1.5.0: TOML config foundation + `daily_session_target` consumer (Phase 9)
 - v1.6.0: Dailies/Weeklies — per-category recurring targets + in-session progress HUD + streaks
 - v1.7.0: Read-only web session view on the sync server
 - v1.8.0: Dailies/Weeklies progress panel on the start screen (two-column with inbox/menu); session-count targets (`3x/day`) alongside minute and presence-only targets (schema: `categories.target_sessions`); configurable display/bucketing timezone (`timezone` in config.toml; `JACKTASKS_SYNC_TZ` env on the server — sessions still stored in UTC)
+- v1.9.0: Shift+Tab on end-notes screen → undo End + 5-min break (modeled as Pause so break time is excluded from actual_duration_sec) + auto-extend by another planned-duration block when break ends (red "NEW SESSION STARTED" flash on resume). Multi-block sessions save as ONE row with ONE note. Also: start-screen Dailies/Weeklies panel now renders progress bars (same green as the in-session timer) alongside the existing text/streak.
 
 **Next pickup:**
 - No further phases planned. Ask the user what they'd like next.

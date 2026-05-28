@@ -4,6 +4,47 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-27 — v1.9.0 — End-of-session break+continue shortcut; progress bars in Dailies/Weeklies panel
+
+Two small UX tweaks driven by daily use.
+
+**Shift+Tab on the end-notes screen** undoes the session-end, runs a 5-minute
+break, and then auto-extends the session by another planned-duration block
+when the break ends. Symmetric to the existing Tab shortcut for extend, but
+for full multi-block work sessions. Pressing Enter during the break ends it
+early and resumes the session with the same extension. When the session
+resumes after the break, a red `▶ NEW SESSION STARTED ◀` banner flashes on
+the Active screen for ~2 seconds to warn the user that work has begun again.
+
+Crucially this is **one session row, one reflection note** — a workflow like
+"20 + break + 20 + break + 20, then write a note" saves as a single 60-min
+session, not three 20-min ones. Break time is excluded from the session's
+`actual_duration_sec` automatically because the break is modeled as a Pause
+interval (and `actualDurationSec` subtracts paused time). No new engine
+states or schema changes.
+
+Implementation: `handleEndingNotesBreakContinue` calls
+`ResumeFromEndingNotes` + `Pause`, captures `plannedMin` into a new
+`Model.autoContinueMin` field, and sets `Model.breakEnd = now + 5m`. The
+tickMsg break-expiry path detects `state == Paused && autoContinueMin > 0`
+and fires `Resume` + `Extend(plannedMin)`. The Enter-while-paused path
+mirrors the same flow for early ending. The mid-break is rendered as a
+`☕ Break` countdown screen (overriding the normal Paused screen) so the
+user sees the break timer, not the session timer. Red flash uses a
+`Model.redFlashUntil` deadline rendered via the existing `StyleFlashOn`
+(red bg).
+
+**Dailies/Weeklies panel** now renders an inline 10-cell progress bar
+(`[██████░░░░]`) for each targeted category, using the same `colorSuccess`
+green as the in-session timer. The existing progress text and 🔥 streak
+suffix remain to the right of the bar. Bar fill ratio:
+`periodCount/target_sessions`, `periodSec/(target_minutes*60)`, or 0/1 for
+presence-only — all clamped to [0, 1]. Pulled into helpers
+`progressRatio` and `renderProgressBar` for reuse if the HUD wants a bar
+later.
+
+---
+
 ## 2026-05-27 — Fix: in-app sync failing with "database is locked" (v1.8.1)
 
 Background sync consistently failed when ending a session in the TUI, while
