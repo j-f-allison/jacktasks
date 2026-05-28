@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,8 +68,9 @@ type remListsLoadedMsg struct {
 }
 
 type projRemindersLoadedMsg struct {
-	items []reminders.Reminder
-	err   error
+	listName string
+	items    []reminders.Reminder
+	err      error
 }
 
 type categoryProgressMsg struct {
@@ -90,6 +92,49 @@ type dailyEntry struct {
 type dailiesLoadedMsg struct {
 	entries []dailyEntry
 	err     error
+}
+
+// ── start-screen reminders ────────────────────────────────────────────────────
+
+// startReminder is one entry in the unified reminders list shown on the start
+// screen — either an inbox item or a today/overdue item from a project list.
+type startReminder struct {
+	rem         reminders.Reminder
+	projectID   string // empty for inbox items
+	projectName string // empty for inbox items
+	urgency     int    // 2=overdue (red), 1=due today (yellow), 0=undated (normal)
+}
+
+type dueBucket int
+
+const (
+	dueHidden dueBucket = iota
+	dueNormal           // no due date (inbox only)
+	dueToday
+	dueOverdue
+)
+
+// classifyDue buckets a reminder's due date relative to today in the display
+// timezone. For inbox items, "future" is hidden; for project items, both
+// "future" and "no due date" are hidden — the caller filters accordingly.
+func classifyDue(due *time.Time, now time.Time, loc *time.Location) dueBucket {
+	if due == nil {
+		return dueNormal
+	}
+	d := due.In(loc)
+	n := now.In(loc)
+	dy, dm, dd := d.Date()
+	ny, nm, nd := n.Date()
+	dayDue := time.Date(dy, dm, dd, 0, 0, 0, 0, loc)
+	dayNow := time.Date(ny, nm, nd, 0, 0, 0, 0, loc)
+	switch {
+	case dayDue.Before(dayNow):
+		return dueOverdue
+	case dayDue.Equal(dayNow):
+		return dueToday
+	default:
+		return dueHidden
+	}
 }
 
 // ── UI sub-states ─────────────────────────────────────────────────────────────
@@ -141,6 +186,13 @@ type Model struct {
 	// per-project reminders: loaded when a project with RemindersListName is selected
 	selectedProjRemindersList string               // RemindersListName of the currently selected project
 	projReminderItems         []reminders.Reminder // incomplete items from that list
+
+	// start-screen reminder aggregation: at startup we load reminders from
+	// every project list (in addition to the inbox) so due-today/overdue items
+	// surface on the main screen. projectListItems is keyed by RemindersListName.
+	projectListItems     map[string][]reminders.Reminder
+	pendingProjListLoads int             // number of project-list loads still outstanding
+	startReminders       []startReminder // sorted/filtered view shown on the start screen
 
 	// list picker overlay ('l' on project screen)
 	remListsEditIdx int      // index into m.projects of the project being edited
@@ -377,7 +429,9 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.loadProjectsCmd())
 	}
 	if m.remClient != nil && m.extra == uiExtraStart {
-		cmds = append(cmds, m.loadInboxCmd(), m.sp.Tick)
+		// Also load projects so we can fetch reminders from each project list
+		// and surface due-today/overdue items on the start screen.
+		cmds = append(cmds, m.loadInboxCmd(), m.loadProjectsCmd(), m.sp.Tick)
 	}
 	if m.extra == uiExtraStart {
 		cmds = append(cmds, m.loadDailiesCmd())
@@ -480,8 +534,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projRemindersLoadedMsg:
 		if msg.err != nil {
 			fmt.Fprintf(os.Stderr, "load project reminders: %v\n", msg.err)
-		} else {
+		}
+		// Store under the list name so the start screen can index by project.
+		if m.projectListItems == nil {
+			m.projectListItems = make(map[string][]reminders.Reminder)
+		}
+		if msg.err == nil {
+			m.projectListItems[msg.listName] = msg.items
+		}
+		if m.pendingProjListLoads > 0 {
+			m.pendingProjListLoads--
+		}
+		// Keep the legacy project-screen state in sync if this load matches
+		// the currently selected project's list.
+		if msg.err == nil && msg.listName != "" && msg.listName == m.selectedProjRemindersList {
 			m.projReminderItems = msg.items
+		}
+		if m.extra == uiExtraStart {
+			m.recomputeStartReminders()
 		}
 		return m, nil
 
@@ -500,6 +570,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return fatalMsg{msg.err} }
 		}
 		m.projects = msg.projs
+		// On the start screen, projects are loaded purely so we can fetch
+		// reminders from each project list — don't disturb the inbox cursor
+		// or input placeholder.
+		if m.extra == uiExtraStart {
+			var cmds []tea.Cmd
+			if m.remClient != nil {
+				if m.projectListItems == nil {
+					m.projectListItems = make(map[string][]reminders.Reminder)
+				}
+				for _, p := range m.projects {
+					if p.RemindersListName == "" {
+						continue
+					}
+					m.pendingProjListLoads++
+					cmds = append(cmds, m.loadProjRemindersCmd(p.RemindersListName))
+				}
+			}
+			m.recomputeStartReminders()
+			return m, tea.Batch(cmds...)
+		}
 		m.cursor = 0
 		m.input.Reset()
 		m.input.Placeholder = "choice"
@@ -532,6 +622,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.inboxItems = msg.items
 		}
+		m.recomputeStartReminders()
 		return m, nil
 
 	case syncDoneMsg:
@@ -852,7 +943,7 @@ func (m Model) listLen() int {
 	state := m.machine.State()
 	switch {
 	case m.extra == uiExtraStart:
-		n := len(m.inboxItems)
+		n := len(m.startReminders)
 		if m.resume != nil {
 			n++
 		}
@@ -879,7 +970,7 @@ func (m Model) cursorVal() string {
 	state := m.machine.State()
 	switch {
 	case m.extra == uiExtraStart:
-		n := len(m.inboxItems)
+		n := len(m.startReminders)
 		if m.cursor < n {
 			return strconv.Itoa(m.cursor + 1)
 		}
@@ -942,21 +1033,37 @@ func (m Model) cursorVal() string {
 func (m Model) handleStartScreen(val string) (tea.Model, tea.Cmd) {
 	val = strings.ToLower(strings.TrimSpace(val))
 
-	// Inbox item selected by number (1..N).
-	if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= len(m.inboxItems) {
-		item := m.inboxItems[n-1]
-		m.doContextText = item.Title
+	// Reminder selected by number (1..N) — either an inbox item or a
+	// today/overdue item from a project list.
+	if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= len(m.startReminders) {
+		sr := m.startReminders[n-1]
+		m.doContextText = sr.rem.Title
 		// Defer Reminders completion until end-of-session disposition prompt,
 		// so an aborted session doesn't falsely mark the reminder done.
-		m.pendingReminderID = item.ID
-		m.pendingReminderTitle = item.Title
+		m.pendingReminderID = sr.rem.ID
+		m.pendingReminderTitle = sr.rem.Title
 		m.inboxItems = nil
+		m.startReminders = nil
 		m.extra = uiExtraNone
 		m.resume = nil
 		m.cursor = 0
 		_ = m.machine.BeginSetup()
 		m.input.Reset()
 		m.input.Placeholder = "choice"
+		// If the reminder came from a project list, auto-pick that project
+		// and jump straight to category selection.
+		if sr.projectID != "" {
+			for _, p := range m.projects {
+				if p.ID == sr.projectID {
+					m.selectedProjName = p.Name
+					m.selectedProjRemindersList = p.RemindersListName
+					m.projReminderItems = m.projectListItems[p.RemindersListName]
+					_ = m.machine.SetProject(p.ID, m.now)
+					m.input.Placeholder = "choice"
+					return m, m.loadCategoriesCmd()
+				}
+			}
+		}
 		return m, m.loadProjectsCmd()
 	}
 
@@ -1051,7 +1158,12 @@ func (m Model) handleRecoverScreen(val string) (tea.Model, tea.Cmd) {
 		m.input.Reset()
 		var cmds []tea.Cmd
 		if m.extra == uiExtraStart && m.remClient != nil {
-			cmds = append(cmds, m.loadInboxCmd(), m.sp.Tick)
+			// Reset state so a fresh load fully refreshes the panel.
+			m.inboxLoaded = false
+			m.projectListItems = nil
+			m.pendingProjListLoads = 0
+			m.startReminders = nil
+			cmds = append(cmds, m.loadInboxCmd(), m.loadProjectsCmd(), m.sp.Tick)
 		} else if m.machine.State() == session.StateSetupProject {
 			cmds = append(cmds, m.loadProjectsCmd())
 		}
@@ -1365,7 +1477,12 @@ func (m Model) handleActiveCommand(val string) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.clearSentinelCmd())
 		if m.extra == uiExtraStart && m.remClient != nil {
-			cmds = append(cmds, m.loadInboxCmd(), m.sp.Tick)
+			// Reset state so a fresh load fully refreshes the panel.
+			m.inboxLoaded = false
+			m.projectListItems = nil
+			m.pendingProjListLoads = 0
+			m.startReminders = nil
+			cmds = append(cmds, m.loadInboxCmd(), m.loadProjectsCmd(), m.sp.Tick)
 		} else if m.machine.State() == session.StateSetupProject {
 			cmds = append(cmds, m.loadProjectsCmd())
 		}
@@ -1635,6 +1752,39 @@ func (m Model) loadInboxCmd() tea.Cmd {
 	}
 }
 
+// recomputeStartReminders rebuilds m.startReminders from the latest inbox and
+// project-list loads. Inbox items: undated → normal, today → yellow, overdue →
+// red, future → hidden. Project items: today → yellow, overdue → red, others
+// hidden. Sorted urgency desc (overdue → today → normal), stable within bucket.
+func (m *Model) recomputeStartReminders() {
+	var out []startReminder
+	for _, r := range m.inboxItems {
+		switch classifyDue(r.DueDate, m.now, m.loc) {
+		case dueOverdue:
+			out = append(out, startReminder{rem: r, urgency: 2})
+		case dueToday:
+			out = append(out, startReminder{rem: r, urgency: 1})
+		case dueNormal:
+			out = append(out, startReminder{rem: r, urgency: 0})
+		}
+	}
+	for _, p := range m.projects {
+		if p.RemindersListName == "" {
+			continue
+		}
+		for _, r := range m.projectListItems[p.RemindersListName] {
+			switch classifyDue(r.DueDate, m.now, m.loc) {
+			case dueOverdue:
+				out = append(out, startReminder{rem: r, projectID: p.ID, projectName: p.Name, urgency: 2})
+			case dueToday:
+				out = append(out, startReminder{rem: r, projectID: p.ID, projectName: p.Name, urgency: 1})
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].urgency > out[j].urgency })
+	m.startReminders = out
+}
+
 func (m Model) loadRemListsCmd() tea.Cmd {
 	rc := m.remClient
 	ctx := m.ctx
@@ -1649,7 +1799,7 @@ func (m Model) loadProjRemindersCmd(listName string) tea.Cmd {
 	ctx := m.ctx
 	return func() tea.Msg {
 		items, err := rc.ListItems(ctx, listName)
-		return projRemindersLoadedMsg{items: items, err: err}
+		return projRemindersLoadedMsg{listName: listName, items: items, err: err}
 	}
 }
 
@@ -2228,11 +2378,25 @@ func (m Model) renderStartScreen(b *strings.Builder) {
 	var menu strings.Builder
 	cursorIdx := 0
 
-	if len(m.inboxItems) > 0 {
-		fmt.Fprintf(&menu, "%s\n\n", StyleHeader.Render("Inbox"))
-		for _, item := range m.inboxItems {
-			fmt.Fprintf(&menu, "%s\n", renderListItem(m.cursor == cursorIdx,
-				fmt.Sprintf("%d) %s", cursorIdx+1, item.Title)))
+	if len(m.startReminders) > 0 {
+		fmt.Fprintf(&menu, "%s\n\n", StyleHeader.Render("Reminders"))
+		for _, sr := range m.startReminders {
+			text := fmt.Sprintf("%d) %s", cursorIdx+1, sr.rem.Title)
+			if sr.projectName != "" {
+				text += " [" + sr.projectName + "]"
+			}
+			// Apply urgency color only when the row is not the cursor target —
+			// the selection style already makes the active row obvious and
+			// nesting styles in lipgloss produces inconsistent results.
+			if m.cursor != cursorIdx {
+				switch sr.urgency {
+				case 2:
+					text = StyleError.Render(text)
+				case 1:
+					text = StyleWarn.Render(text)
+				}
+			}
+			fmt.Fprintf(&menu, "%s\n", renderListItem(m.cursor == cursorIdx, text))
 			cursorIdx++
 		}
 		fmt.Fprintln(&menu)

@@ -12,6 +12,7 @@ var (
 	colorPrimary = lipgloss.AdaptiveColor{Light: "#7B2FBE", Dark: "#C97BFA"}
 	colorSuccess = lipgloss.AdaptiveColor{Light: "#0A7C68", Dark: "#4EC8B4"}
 	colorError   = lipgloss.AdaptiveColor{Light: "#CC0000", Dark: "#FF5555"}
+	colorWarn    = lipgloss.AdaptiveColor{Light: "#B58900", Dark: "#FFD866"}
 	colorBorder  = lipgloss.AdaptiveColor{Light: "#CCCCCC", Dark: "#444444"}
 )
 
@@ -22,6 +23,7 @@ var (
 	StyleAccent   = lipgloss.NewStyle().Foreground(colorSuccess)
 	StyleDim      = lipgloss.NewStyle().Faint(true)
 	StyleError    = lipgloss.NewStyle().Foreground(colorError)
+	StyleWarn     = lipgloss.NewStyle().Foreground(colorWarn)
 	StyleSelected = lipgloss.NewStyle().Bold(true).Foreground(colorSuccess)
 	StyleCursor   = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
 	StyleHeader   = lipgloss.NewStyle().Bold(true)

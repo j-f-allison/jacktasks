@@ -5,14 +5,18 @@
 // The real EventKit client is created by NewEventKit. Use NewFake for tests.
 package reminders
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 const InboxListName = "jacktasks-inbox"
 
 // Reminder is a trimmed view of a Reminders item — just what jacktasks needs.
 type Reminder struct {
-	ID    string
-	Title string
+	ID      string
+	Title   string
+	DueDate *time.Time // nil if the reminder has no due date set
 }
 
 // Client is the interface the TUI uses to interact with Apple Reminders.

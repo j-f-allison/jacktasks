@@ -4,6 +4,32 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-28 — v1.10.0 — Due-date-driven start-screen reminders
+
+Rework of the start-screen reminders panel so urgent items surface and noise drops away.
+
+The old "Inbox" section just listed every incomplete jacktasks-inbox reminder, regardless of due date, and project-list reminders were only visible after entering the matching project. That meant overdue items could sit invisible behind the project selector while undated/future items took up screen real estate.
+
+New rules for the renamed **Reminders** section on the start screen:
+
+- **jacktasks-inbox**: overdue → red at top; due today → yellow next; no due date → normal; due in the future → hidden.
+- **Project-associated lists**: due today → yellow with `[project]` tag; overdue → red with `[project]` tag; everything else hidden.
+- Sort is stable within each urgency bucket (red > yellow > normal), preserving EventKit order.
+- Selecting a `[project]` reminder auto-picks that project and jumps straight to category selection — no second picker step.
+
+Implementation notes:
+
+- `reminders.Reminder` gained `DueDate *time.Time` (passed through from EventKit; was always available, never read).
+- The TUI now loads projects at startup (previously deferred to project selection) so it can fan out reminder loads to every list. Results populate `m.projectListItems` keyed by `RemindersListName`. A `recomputeStartReminders` helper merges and sorts on each load completion.
+- Added `colorWarn` / `StyleWarn` (yellow) to the palette.
+- Cursor selection styling and urgency color are mutually exclusive on a given row — the selected row already reads as active via the cursor + bold-green, and nesting lipgloss styles produced inconsistent output.
+- `projRemindersLoadedMsg` now carries `listName` so a single message type can route to either the start-screen map or the legacy per-project view.
+- The `projectsLoadedMsg` handler now branches: on the start screen it fans out list loads without touching cursor/input; in the project-setup flow it behaves as before.
+
+No schema changes. No new dependencies.
+
+---
+
 ## 2026-05-27 — v1.9.0 — End-of-session break+continue shortcut; progress bars in Dailies/Weeklies panel
 
 Two small UX tweaks driven by daily use.

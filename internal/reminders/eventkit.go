@@ -49,7 +49,7 @@ func (e *eventkitClient) ListItems(_ context.Context, listName string) ([]Remind
 	}
 	out := make([]Reminder, len(items))
 	for i, r := range items {
-		out[i] = Reminder{ID: r.ID, Title: r.Title}
+		out[i] = Reminder{ID: r.ID, Title: r.Title, DueDate: r.DueDate}
 	}
 	return out, nil
 }
