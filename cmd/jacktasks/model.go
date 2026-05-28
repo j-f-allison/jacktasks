@@ -517,6 +517,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.errMsg = "sync error: " + msg.err.Error()
 			}
+		} else if msg.err != nil {
+			// Surface background sync failures too — otherwise the status line
+			// shows "sync failed" with no clue why.
+			m.errMsg = "sync error: " + msg.err.Error()
 		} else if m.extra == uiExtraStart {
 			// Background sync completed while user is still on the start
 			// screen: update the displayed summary so they see fresh state.

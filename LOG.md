@@ -4,6 +4,30 @@ Running record of significant decisions and progress on jacktasks. Entries are a
 
 ---
 
+## 2026-05-27 — Fix: in-app sync failing with "database is locked" (v1.8.1)
+
+Background sync consistently failed when ending a session in the TUI, while
+`jacktasks sync` standalone always worked. Root cause: concurrency, not the
+sync code (both paths call the same `syncclient.Sync`).
+
+On `sessionSavedMsg` the TUI fires `runSyncCmd` (DB writes) and
+`loadCategoryProgressCmd` (DB reads) as separate Bubble Tea commands, each in
+its own goroutine. With the default `database/sql` connection pool and
+`journal_mode=DELETE`, those two goroutines race on different pooled
+connections, and with no `busy_timeout` the loser gets `SQLITE_BUSY` immediately
+— surfacing as "✗ sync failed". The standalone CLI never collides because it's
+the only thing touching the DB. The startup auto-sync could fail the same way.
+
+**Fix:** `db.SetMaxOpenConns(1)` in `store.Open`. One connection serializes all
+access at the Go layer, so SQLite never sees concurrency. The sync's long HTTP
+calls happen between DB calls and don't hold the connection, so no stalls. Bonus:
+it also makes the per-connection `PRAGMA foreign_keys=ON` apply to every query
+instead of just whichever pooled connection ran it (a latent FK-enforcement gap).
+
+Also surfaced the underlying error for background sync failures in
+`model.go` (`syncDoneMsg`): previously `m.errMsg` was only set for manual syncs,
+so a failed background sync showed "sync failed" with no detail.
+
 ## 2026-05-27 — Dailies/Weeklies panel on the start screen (v1.8.0)
 
 The recurring-target progress HUD previously only appeared during an active

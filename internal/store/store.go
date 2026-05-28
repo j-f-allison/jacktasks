@@ -33,6 +33,15 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
+	// Cap the pool at a single connection. The TUI fires concurrent goroutines
+	// (e.g. a background sync racing the category-progress query after a session
+	// save), and with journal_mode=DELETE that yields SQLITE_BUSY ("database is
+	// locked"). One connection serializes all access at the Go layer so SQLite
+	// never sees concurrency. It also guarantees the per-connection
+	// foreign_keys=ON pragma below applies to every query, not just whichever
+	// pooled connection happened to run it.
+	db.SetMaxOpenConns(1)
+
 	pragmas := []string{
 		"PRAGMA journal_mode=DELETE",
 		"PRAGMA foreign_keys=ON",
